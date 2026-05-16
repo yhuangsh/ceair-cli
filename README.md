@@ -1,0 +1,155 @@
+# ceair-cli
+
+中国东方航空命令行工具 — 搜索航班、登录账号、在线订票
+
+China Eastern Airlines CLI — search, book, and manage flights from the terminal.
+
+## Features
+
+- 🔍 **Flight Search** — Search domestic flights with real-time pricing
+- 🔐 **QR Login** — Scan QR code in terminal, no CAPTCHA needed
+- 🎫 **Book Flights** — Create unpaid orders via CLI flags, config, or interactive prompts
+- 📋 **Order Details** — View upcoming trips with seat, check-in, baggage info
+- ⚙️ **Configurable** — Set passenger defaults, skip prompts
+
+## Install
+
+```bash
+# Install globally from GitHub
+npm install -g yhuangsh/ceair-cli
+
+# Or clone and link
+git clone https://github.com/yhuangsh/ceair-cli.git
+cd ceair-cli
+npm install
+npm link
+```
+
+Chromium is auto-installed on first `npm install` via Playwright.
+
+## Quick Start
+
+```bash
+# 1. Login
+ceair-cli login --method qrcode
+
+# 2. Search
+ceair-cli search SHA BJS 2026-06-15
+
+# 3. Book (fully specified, zero prompts)
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight 0 --cabin 0 \
+  -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y
+
+# 4. Check upcoming trips
+ceair-cli orders
+```
+
+## Commands
+
+### `ceair-cli search <from> <to> <date>`
+
+Search flights. Cities can be codes or Chinese names.
+
+```bash
+ceair-cli search SHA BJS 2026-06-15
+ceair-cli search 上海 北京 2026-06-15 --cabin C
+ceair-cli search SHA CAN 2026-06-15 --return 2026-06-20
+```
+
+### `ceair-cli login`
+
+Login via QR code (recommended), SMS, or password.
+
+```bash
+ceair-cli login --method qrcode    # Scan QR in terminal
+ceair-cli login -m sms             # Phone verification
+ceair-cli login -m password        # Account + password
+```
+
+### `ceair-cli book`
+
+Book a flight. Params resolved: **CLI flags > config file > interactive prompt**.
+
+```bash
+# Fully interactive
+ceair-cli book
+
+# With route, pick flight interactively
+ceair-cli book -f SHA -t BJS -d 2026-06-15
+
+# Fully specified (zero prompts)
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight 0 --cabin 0 \
+  -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y
+```
+
+### `ceair-cli orders`
+
+List upcoming trips with full detail (passenger, ticket number, seat, check-in status, baggage).
+
+```bash
+ceair-cli orders           # Upcoming/active orders
+ceair-cli orders --all     # Include historical/cancelled
+```
+
+### `ceair-cli config`
+
+Manage defaults in `~/.config/ceair-cli/config.json`.
+
+```bash
+ceair-cli config set passenger.name 张三
+ceair-cli config set passenger.phone 13800138000
+ceair-cli config set passenger.idNo 110101199001011234
+ceair-cli config list
+```
+
+### Other commands
+
+```bash
+ceair-cli status            # Check login status
+ceair-cli cancel <orderNo>  # Cancel unpaid order
+ceair-cli logout            # Clear session
+ceair-cli cities            # List supported city codes
+```
+
+## Supported Cities
+
+Run `ceair-cli cities` for the full list. Major cities:
+
+| Code | City | Airports |
+|------|------|----------|
+| SHA | 上海 | PVG(浦东), SHA(虹桥) |
+| BJS | 北京 | PEK(首都), PKX(大兴) |
+| CAN | 广州 | CAN(白云) |
+| CTU | 成都 | CTU(天府), TFU(双流) |
+| SZX | 深圳 | SZX(宝安) |
+
+## How It Works
+
+Uses [Playwright](https://playwright.dev/) Chromium to bypass China Eastern's WAF/bot protection. The browser loads the real website, and the CLI interacts with the Vue.js SPA components directly — form clicks trigger search, Vue methods handle booking navigation.
+
+Orders are created in **unpaid** state. Complete payment on the [CEAir website](https://www.ceair.com) or app. Customer service: **95530**.
+
+## Architecture
+
+```
+src/
+├── cli.js        # CLI commands (Commander.js)
+├── api.js        # Playwright browser automation
+├── session.js    # Login session persistence
+├── config.js     # User config (~/.config/ceair-cli/)
+├── paths.js      # Shared paths + migration
+├── cities.js     # City/airport code mapping
+└── display.js    # Terminal output formatting
+```
+
+## Development Wiki
+
+Internal reverse-engineering docs (API structures, WAF bypass, booking flow) are in a separate private repo:
+
+```bash
+git clone https://github.com/yhuangsh/ceair-cli-wiki.git llm-wiki
+```
+
+## License
+
+MIT
