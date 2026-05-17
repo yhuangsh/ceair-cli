@@ -1,0 +1,41 @@
+#!/bin/bash
+#
+# Pre-commit hook: remind about README when src/ files change.
+# Wiki (llm-wiki/) is gitignored, so wiki checks are informational only.
+#
+# Install: git config core.hooksPath .githooks
+#
+
+STAGED_SRC=$(git diff --cached --name-only -- 'src/*.js')
+WARNINGS=()
+
+if [ -n "$STAGED_SRC" ]; then
+  # Check README — staged or unstaged?
+  README_CHANGED=$(git diff --cached --name-only -- 'README.md'; git diff --name-only -- 'README.md')
+  if [ -z "$README_CHANGED" ]; then
+    WARNINGS+=("  ⚠  src/ changed but README.md was not updated — check CLI help/examples")
+  fi
+
+  # Wiki is gitignored, just print a reminder (non-blocking)
+  WIKI_CHANGED=$(git diff --name-only -- 'llm-wiki/log.md')
+  if [ -z "$WIKI_CHANGED" ]; then
+    echo "  ℹ  src/ changed — remember to update llm-wiki/ (gitignored)"
+  fi
+fi
+
+if [ ${#WARNINGS[@]} -gt 0 ]; then
+  echo ""
+  echo "Pre-commit reminders:"
+  for w in "${WARNINGS[@]}"; do
+    echo "$w"
+  done
+  echo ""
+  echo "  Commit anyway? (y/n)"
+  read -r REPLY
+  if [ "$REPLY" != "y" ]; then
+    echo "Aborted. Update the files above and try again."
+    exit 1
+  fi
+fi
+
+exit 0

@@ -1,0 +1,25 @@
+#!/bin/bash
+#
+# Post-commit hook: auto-commit changes in llm-wiki/ (separate repo).
+# Uses the same commit message as the parent ceair-cli commit.
+#
+# Install: git config core.hooksPath .githooks
+#
+
+WIKI_DIR="$(git rev-parse --show-toplevel)/llm-wiki"
+
+if [ ! -d "$WIKI_DIR/.git" ]; then
+  exit 0
+fi
+
+cd "$WIKI_DIR" || exit 0
+
+# Only commit if there are changes
+if [ -n "$(git status --porcelain)" ]; then
+  MSG="$(cd "$(git rev-parse --show-toplevel)/.." && git log -1 --format='%s')"
+  git add -A
+  git commit -m "$MSG" --quiet
+  echo "  📝 llm-wiki auto-committed: $MSG"
+fi
+
+exit 0

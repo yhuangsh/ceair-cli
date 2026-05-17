@@ -1,6 +1,6 @@
 {
   "name": "ceair-cli",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "China Eastern Airlines CLI — search, book, and manage flights from the terminal",
   "main": "src/cli.js",
   "bin": {
@@ -12,7 +12,8 @@
   "scripts": {
     "ceair-cli": "node src/cli.js",
     "postinstall": "npx playwright install chromium",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/bugs.test.js",
+    "test:e2e": "CEAIR_SILENT=1 node --test test/e2e/e2e.test.js"
   },
   "keywords": [
     "ceair",

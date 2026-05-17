@@ -36,8 +36,8 @@ ceair-cli login --method qrcode
 # 2. Search
 ceair-cli search SHA BJS 2026-06-15
 
-# 3. Book (fully specified, zero prompts)
-ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight 0 --cabin 0 \
+# 3. Book (match by flight number, zero prompts)
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \
   -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y
 
 # 4. Check upcoming trips
@@ -77,8 +77,11 @@ ceair-cli book
 # With route, pick flight interactively
 ceair-cli book -f SHA -t BJS -d 2026-06-15
 
-# Fully specified (zero prompts)
-ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight 0 --cabin 0 \
+# Match by flight number (recommended)
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y
+
+# Fully specified with config defaults
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \
   -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y
 ```
 
@@ -148,6 +151,19 @@ Internal reverse-engineering docs (API structures, WAF bypass, booking flow) are
 
 ```bash
 git clone https://github.com/yhuangsh/ceair-cli-wiki.git llm-wiki
+```
+
+## Testing
+
+```bash
+npm test                # Unit tests (19 tests)
+npm run test:e2e        # E2E against real ceair.com (requires QR login)
+```
+
+E2E tests try multiple routes and dates to find available flights. Override the default date:
+
+```bash
+CEAIR_E2E_DATE=2026-06-15 npm run test:e2e
 ```
 
 ## License

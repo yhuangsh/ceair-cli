@@ -1,0 +1,42 @@
+#!/bin/bash
+#
+# Pre-push hook: auto-push llm-wiki/ before pushing ceair-cli.
+#
+# Install: git config core.hooksPath .githooks
+#
+
+WIKI_DIR="$(git rev-parse --show-toplevel)/llm-wiki"
+
+if [ ! -d "$WIKI_DIR/.git" ]; then
+  exit 0
+fi
+
+cd "$WIKI_DIR" || exit 0
+
+# Commit any remaining changes first (in case post-commit missed something)
+if [ -n "$(git status --porcelain)" ]; then
+  MSG="$(cd "$(git rev-parse --show-toplevel)/.." && git log -1 --format='%s')"
+  git add -A
+  git commit -m "$MSG" --quiet
+  echo "  📝 llm-wiki auto-committed: $MSG"
+fi
+
+# Check if there are unpushed commits
+LOCAL=$(git rev-parse HEAD)
+REMOTE=$(git rev-parse @{u} 2>/dev/null || echo "")
+
+if [ "$LOCAL" != "$REMOTE" ]; then
+  echo "  📤 Pushing llm-wiki..."
+  git push --quiet 2>&1
+  if [ $? -eq 0 ]; then
+    echo "  ✅ llm-wiki pushed"
+  else
+    echo "  ❌ llm-wiki push failed — push ceair-cli anyway? (y/n)"
+    read -r REPLY
+    if [ "$REPLY" != "y" ]; then
+      exit 1
+    fi
+  fi
+fi
+
+exit 0
