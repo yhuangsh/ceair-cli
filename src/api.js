@@ -493,18 +493,17 @@ class CeairApi {
   async _ensureNuxtReady() {
     await this._ensureBrowser();
 
-    // Check if Nuxt is already loaded and on the right page
+    // Check if Nuxt is already loaded and we're on the homepage
     const currentUrl = this.page.url();
-    const onMainSite =
-      currentUrl.includes('ceair.com') && !currentUrl.includes('sso.ceair.com');
+    const onHomepage = currentUrl.includes('ceair.com/zh/cny/home') ||
+                       (currentUrl.match(/ceair\.com\/?$/) != null);
 
-    if (onMainSite) {
+    if (onHomepage) {
       const hasNuxt = await this.page.evaluate(() => !!window.$nuxt);
-      if (hasNuxt) return; // already ready
+      if (hasNuxt) return;
     }
 
     // Navigate to homepage and wait for Nuxt
-    // Use 'domcontentloaded' (faster than 'load') and retry on failure
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         await this.page.goto(`${BASE_URL}/zh/cny/home`, {
@@ -516,7 +515,6 @@ class CeairApi {
         const ready = await this.page.evaluate(() => !!window.$nuxt);
         if (ready) return;
 
-        // Wait more for Nuxt to boot
         await this.page.waitForTimeout(10000);
         const retry = await this.page.evaluate(() => !!window.$nuxt);
         if (retry) return;
@@ -588,16 +586,67 @@ class CeairApi {
       await this.page.waitForTimeout(500);
     }
 
+    // ─── Fill departure date ───────────────────────────────
+    // The form defaults to today; we must set the requested date.
+    try {
+      await this.page.evaluate((dateStr) => {
+        // Strategy 1: Find date input by placeholder/class and set value
+        const candidates = document.querySelectorAll(
+          'input[placeholder*="日期"], input[placeholder*="出发"], ' +
+          '.ceair-date-editor input, .ceair-input__inner_homesearch[type="text"]'
+        );
+        for (const input of candidates) {
+          const rect = input.getBoundingClientRect();
+          if (rect.width < 10) continue; // skip hidden
+          // Remove readonly if present
+          input.removeAttribute('readonly');
+          const nativeSetter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype, 'value'
+          ).set;
+          nativeSetter.call(input, dateStr);
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          return true;
+        }
+
+        // Strategy 2: Find Vue date picker component and set its value
+        const allEls = document.querySelectorAll('[class*="date"], [class*="picker"]');
+        for (const el of allEls) {
+          const vue = el.__vue__;
+          if (vue && typeof vue.$emit === 'function') {
+            vue.$emit('input', dateStr);
+            vue.$emit('change', dateStr);
+            return true;
+          }
+        }
+        return false;
+      }, depDate);
+      await this.page.waitForTimeout(300);
+    } catch {
+      // Date filling failed — search may use today's date
+    }
+
     // Listen for S200 on the network
     let networkResolve;
     const networkPromise = new Promise((r) => { networkResolve = r; });
+    let captured = false;
     const handler = async (resp) => {
-      if (resp.url().includes('briefInfo')) {
+      if (captured) return;
+      const url = resp.url();
+      if (url.includes('briefInfo')) {
         try {
           const text = await resp.text();
-          if (text.includes('"S200"')) {
+          const json = JSON.parse(text);
+          if (json.resultCode === 'S200') {
+            captured = true;
             this.page.off('response', handler);
-            networkResolve(JSON.parse(text));
+            networkResolve(json);
+          } else {
+            // Return non-S200 responses too (e.g. 231002 = no flights, 232007 = error)
+            // The caller can handle these appropriately
+            captured = true;
+            this.page.off('response', handler);
+            networkResolve(json);
           }
         } catch {}
       }
@@ -605,22 +654,68 @@ class CeairApi {
     this.page.on('response', handler);
 
     // Click search
-    await this.page.locator('button.submit-btn:has-text("搜索")').first().click({ force: true });
+    const searchBtn = this.page.locator('button.submit-btn:has-text("搜索")').first();
+    const searchBtnVisible = await searchBtn.isVisible().catch(() => false);
+    if (!searchBtnVisible) {
+      this.page.off('response', handler);
+      return { resultCode: 'SEARCH_TIMEOUT', resultMsg: '搜索按钮不可见 — 可能不在首页或页面未加载完成' };
+    }
+    await searchBtn.click({ force: true });
 
-    // Race: (A) S200 from network  (B) navigation then wait for network S200  (C) timeout
+    // Wait for either:
+    //   (A) S200 response captured via network listener
+    //   (B) Page navigated to /shopping/ — then wait for S200 on the new page
+    //   (C) Timeout
+    //
+    // Key fix: the S200 response may arrive DURING navigation (before or after).
+    // The page.on('response') handler survives navigation in Playwright,
+    // so networkPromise should resolve regardless.
+    //
+    // But sometimes the response arrives and is captured by the browser's
+    // internal fetch, not as a network event visible to Playwright.
+    // In that case, after navigation, we check the Vuex store directly.
     const result = await Promise.race([
-      // (A) S200 captured via network listener (AJAX, same-page — no navigation)
+      // (A) S200 from network listener (works for same-page AJAX)
       networkPromise,
 
-      // (B) Page navigated to /shopping/ — the S200 still fires on the network,
-      //     so wait for it (the Vuex store on the new page is empty)
+      // (B) Page navigated to /shopping/ — S200 may have already arrived
+      //     during navigation. Check Vuex store for cached results.
       (async () => {
         try {
           await this.page.waitForURL('**/shopping/**', { timeout: 15000 });
-          // Navigation happened — wait for the network S200 that follows
+          // Navigation happened. The S200 may have been captured already
+          // by the network handler (networkPromise will resolve soon),
+          // OR it may be in the Vuex store.
           const navResult = await Promise.race([
             networkPromise,
-            new Promise((r) => setTimeout(() => r(null), 20000)),
+            // Check Vuex store for cached flight data
+            (async () => {
+              // Wait a moment for Nuxt to hydrate on the new page
+              await this.page.waitForTimeout(5000);
+              const storeData = await this.page.evaluate(() => {
+                const store = window.$nuxt?.$store;
+                const flight = store?.state?.flight;
+                const keys = flight ? Object.keys(flight) : [];
+                const hasNuxt = !!window.$nuxt;
+                const hasStore = !!store;
+                const hasFlight = !!flight;
+                const flightKeys = keys.join(',');
+                const itemsCount = flight?.flightItems?.length || flight?.briefInfo?.data?.flightItems?.length || 0;
+                if (itemsCount > 0) {
+                  const items = flight.flightItems || flight.briefInfo?.data?.flightItems;
+                  return {
+                    resultCode: 'S200',
+                    data: { flightItems: items },
+                    _debug: { hasNuxt, hasStore, hasFlight, flightKeys, itemsCount },
+                  };
+                }
+                return { _debug: { hasNuxt, hasStore, hasFlight, flightKeys, itemsCount } };
+              });
+              if (storeData?.resultCode === 'S200') return storeData;
+              // Still nothing — wait more for network
+              return networkPromise;
+            })(),
+            new Promise((r) => setTimeout(() => r(null), 15000)),
           ]);
           this.page.off('response', handler);
           return navResult;
@@ -663,7 +758,7 @@ class CeairApi {
   async createBooking(params) {
     const {
       searchResult,
-      flightIndex = 0,
+      flightItemIndex = 0,
       cabinIndex = 0,
       passenger,
       contact,
@@ -676,15 +771,18 @@ class CeairApi {
     await this._dismissModals();
 
     // Find all cabin price elements (cabin-level-item cabin-select pointer)
-    // They are ordered per flight card, per cabin row
     // Each flight card has cabinInfoDescs.length price elements
     const flightItems = searchResult?.data?.flightItems || [];
-    if (flightIndex >= flightItems.length) {
-      throw new Error(`航班序号 ${flightIndex} 超出范围`);
+    if (flightItemIndex >= flightItems.length) {
+      throw new Error(`航班序号 ${flightItemIndex} 超出范围`);
     }
 
-    const cabinCount = flightItems[flightIndex].cabinInfoDescs?.length || 1;
-    const targetCabinOffset = flightIndex * cabinCount + cabinIndex;
+    // Calculate correct DOM offset by summing cabin counts of all preceding flights
+    let targetCabinOffset = 0;
+    for (let i = 0; i < flightItemIndex; i++) {
+      targetCabinOffset += flightItems[i].cabinInfoDescs?.length || 1;
+    }
+    targetCabinOffset += cabinIndex;
 
     // Scroll the target flight into view (approximate)
     await page.evaluate((idx) => {
@@ -873,17 +971,31 @@ class CeairApi {
 
   /**
    * Cancel an unpaid order
-   * Note: cancel API is WAF-protected, may need retries
+   * Retries with fresh Nuxt loading if the first attempt fails.
    */
   async cancelOrder(tradeOrderNo) {
     await this._ensureBrowser();
-    return this.page.evaluate(async (tradeOrderNo) => {
-      const http = window.$nuxt?.$http;
-      if (!http?.order?.cancelTicketOrder) {
-        return { resultCode: 'ERROR', resultMsg: 'no cancel API' };
-      }
-      return http.order.cancelTicketOrder({ tradeOrderNo, orderType: 'AT' });
-    }, tradeOrderNo);
+
+    const attemptCancel = async () => {
+      return this.page.evaluate(async (tradeOrderNo) => {
+        const http = window.$nuxt?.$http;
+        if (!http?.order?.cancelTicketOrder) {
+          return { resultCode: 'ERROR', resultMsg: 'no cancel API' };
+        }
+        return http.order.cancelTicketOrder({ tradeOrderNo, orderType: 'AT' });
+      }, tradeOrderNo);
+    };
+
+    // First attempt
+    let result = await attemptCancel();
+
+    // If failed (no Nuxt or WAF blocked), reload and retry
+    if (result.resultCode === 'ERROR' || result.resultCode === 'FETCH_ERROR') {
+      await this._ensureNuxtReady();
+      result = await attemptCancel();
+    }
+
+    return result;
   }
 }
 

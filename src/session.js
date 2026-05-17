@@ -103,6 +103,11 @@ class SessionManager {
   async logout() {
     try {
       await this.api._ensureBrowser();
+      // Clear localStorage before API call (removes cached user data)
+      await this.api.page.evaluate(() => {
+        try { localStorage.clear(); } catch {}
+        try { sessionStorage.clear(); } catch {}
+      });
       await this.api.logout();
     } catch {
       // ignore

@@ -5,26 +5,31 @@
 const chalk = require('chalk');
 const { getCityName } = require('./cities');
 
+function _log(...args) {
+  if (process.env.CEAIR_SILENT !== '1') console.log(...args);
+}
+
 /**
  * Format and display flight search results
  * Handles the new API response format: resultCode "S200", data.flightItems
  */
 function displayFlights(flightData) {
   if (!flightData) {
-    console.log(chalk.red('搜索失败: 无返回数据'));
+    _log(chalk.red('搜索失败: 无返回数据'));
     return [];
   }
 
-  // Handle WAF block
-  if (flightData.resultCode === 'WAF_BLOCKED') {
-    console.log(chalk.red('搜索失败: 请求被WAF拦截，请稍后重试'));
+  // Handle WAF block or search timeout
+  if (flightData.resultCode === 'WAF_BLOCKED' || flightData.resultCode === 'SEARCH_TIMEOUT') {
+    _log(chalk.red(`搜索失败: ${flightData.resultMsg || '请求超时，请稍后重试'}`));
     return [];
   }
 
-  // Handle specific error codes
-  if (flightData.resultCode === '232007') {
-    console.log(chalk.yellow('未找到符合条件的航班。'));
-    console.log(chalk.gray('  ' + (flightData.resultMsg || '请更换日期后重新查询，或致电95530咨询办理。')));
+  // Handle specific no-flights error codes (normal outcome, not an error)
+  const noFlightsCodes = ['232007', '231002'];
+  if (noFlightsCodes.includes(flightData.resultCode)) {
+    _log(chalk.yellow('未找到符合条件的航班。'));
+    _log(chalk.gray('  ' + (flightData.resultMsg || '请更换日期后重新查询，或致电95530咨询办理。')));
     return [];
   }
 
@@ -34,7 +39,7 @@ function displayFlights(flightData) {
     const flightItems = data.flightItems || [];
 
     if (!flightItems.length) {
-      console.log(chalk.yellow('未找到符合条件的航班。'));
+      _log(chalk.yellow('未找到符合条件的航班。'));
       return [];
     }
 
@@ -45,14 +50,14 @@ function displayFlights(flightData) {
   if (flightData.resultCode === 'A200') {
     const { tripList = [] } = flightData.data || {};
     if (!tripList.length) {
-      console.log(chalk.yellow('未找到符合条件的航班。'));
+      _log(chalk.yellow('未找到符合条件的航班。'));
       return [];
     }
     return displayLegacyFormat(tripList);
   }
 
   // Unknown error
-  console.log(
+  _log(
     chalk.red('搜索失败:'),
     flightData.resultMsg || `错误码 ${flightData.resultCode || '未知'}`
   );
@@ -66,7 +71,8 @@ function displayNewFormat(flightItems) {
   const flights = [];
   let index = 0;
 
-  for (const item of flightItems) {
+  for (let fii = 0; fii < flightItems.length; fii++) {
+    const item = flightItems[fii];
     for (const fi of item.flightInfos || []) {
       for (const seg of fi.flightSegments || []) {
         const depTime = seg.orgTime || '--:--';
@@ -110,6 +116,7 @@ function displayNewFormat(flightItems) {
 
         const flightInfo = {
           index: index++,
+          flightItemIndex: fii,
           flightNo,
           depTime,
           arrTime,
@@ -140,7 +147,7 @@ function displayNewFormat(flightItems) {
           ? chalk.green(`¥${lowestPrice}`)
           : chalk.gray('已售罄');
         const wifiIcon = seg.wifiOpenStatus ? ' 📶' : '';
-        console.log(
+        _log(
           chalk.white(`[${index - 1}] `) +
             chalk.cyan(`${flightNo}`) +
             '  ' +
@@ -153,7 +160,7 @@ function displayNewFormat(flightItems) {
             priceStr +
             chalk.gray(wifiIcon)
         );
-        console.log(
+        _log(
           chalk.gray(
             `     ${depAirport}${depTerminal} → ${arrAirport}${arrTerminal}  ${aircraft}`
           )
@@ -163,9 +170,9 @@ function displayNewFormat(flightItems) {
           const priceLine = priceOptions
             .map((p) => `${p.brand}: ¥${p.price}(含税¥${p.totalPrice})`)
             .join(' | ');
-          console.log(chalk.gray(`     ${priceLine}`));
+          _log(chalk.gray(`     ${priceLine}`));
         }
-        console.log();
+        _log();
       }
     }
   }
@@ -179,8 +186,10 @@ function displayNewFormat(flightItems) {
 function displayLegacyFormat(tripList) {
   const flights = [];
   let index = 0;
+  let tripIdx = 0;
 
   for (const trip of tripList) {
+    const currentTripIdx = tripIdx++;
     for (const segment of trip.segmentList || []) {
       for (const flight of segment.flightList || []) {
         const depInfo = flight.depInfo || {};
@@ -210,6 +219,7 @@ function displayLegacyFormat(tripList) {
 
         const flightInfo = {
           index: index++,
+          flightItemIndex: currentTripIdx,
           flightNo,
           depTime,
           arrTime,
@@ -223,7 +233,7 @@ function displayLegacyFormat(tripList) {
         const priceStr = lowestPrice
           ? chalk.green(`¥${lowestPrice}`)
           : chalk.gray('已售罄');
-        console.log(
+        _log(
           chalk.white(`[${index - 1}] `) +
             chalk.cyan(`${flightNo}`) +
             '  ' +
@@ -238,9 +248,9 @@ function displayLegacyFormat(tripList) {
           const priceLine = priceOptions
             .map((p) => `${p.brand}/${p.cabin}: ¥${p.price}`)
             .join(' | ');
-          console.log(chalk.gray(`     ${priceLine}`));
+          _log(chalk.gray(`     ${priceLine}`));
         }
-        console.log();
+        _log();
       }
     }
   }
@@ -253,7 +263,7 @@ function displayLegacyFormat(tripList) {
  */
 function displayBookingResult(result) {
   if (!result) {
-    console.log(chalk.red('订票请求失败'));
+    _log(chalk.red('订票请求失败'));
     return;
   }
 
@@ -268,35 +278,35 @@ function displayBookingResult(result) {
     const contactName = result.contactName || '';
     const contactMobile = result.contactMobile || '';
 
-    console.log(chalk.green('\n  ✈ 订单创建成功！\n'));
+    _log(chalk.green('\n  ✈ 订单创建成功！\n'));
     if (orderNo) {
-      console.log(chalk.white(`  订单号:   ${chalk.bold(orderNo)}`));
+      _log(chalk.white(`  订单号:   ${chalk.bold(orderNo)}`));
     }
     if (pnrNo) {
-      console.log(chalk.white(`  PNR:     ${pnrNo}`));
+      _log(chalk.white(`  PNR:     ${pnrNo}`));
     }
     if (segments.length) {
       for (const seg of segments) {
         const dep = seg.departAirport || '';
         const arr = seg.arriveAirport || '';
         const date = seg.departDate || '';
-        console.log(chalk.white(`  航段:     ${dep} → ${arr}  ${date}`));
+        _log(chalk.white(`  航段:     ${dep} → ${arr}  ${date}`));
       }
     }
     if (totalPrice) {
-      console.log(chalk.white(`  总价:     ${currency === 'CNY' ? '¥' : currency + ' '}${totalPrice}`));
+      _log(chalk.white(`  总价:     ${currency === 'CNY' ? '¥' : currency + ' '}${totalPrice}`));
     }
     if (passengers.length) {
-      console.log(chalk.white(`  乘机人:   ${passengers.map(p => p.name || p.passengerName).join(', ')}`));
+      _log(chalk.white(`  乘机人:   ${passengers.map(p => p.name || p.passengerName).join(', ')}`));
     }
     if (contactName) {
-      console.log(chalk.white(`  联系人:   ${contactName} ${contactMobile}`));
+      _log(chalk.white(`  联系人:   ${contactName} ${contactMobile}`));
     }
-    console.log(chalk.yellow('\n  ⚠ 请尽快完成支付，超时订单将自动取消'));
-    console.log(chalk.blue('  https://www.ceair.com/zh/cny/home'));
-    console.log(chalk.gray('  客服电话: 95530\n'));
+    _log(chalk.yellow('\n  ⚠ 请尽快完成支付，超时订单将自动取消'));
+    _log(chalk.blue('  https://www.ceair.com/zh/cny/home'));
+    _log(chalk.gray('  客服电话: 95530\n'));
   } else {
-    console.log(
+    _log(
       chalk.red('订票失败:'),
       result.resultMsg || `错误码 ${result.resultCode}`
     );
@@ -318,7 +328,7 @@ function formatDate(dateStr) {
  */
 function displayUpcomingTrips(trips) {
   if (!trips || !trips.length) {
-    console.log(chalk.gray('  暂无即将出行的航班'));
+    _log(chalk.gray('  暂无即将出行的航班'));
     return;
   }
 
@@ -334,7 +344,7 @@ function displayUpcomingTrips(trips) {
     };
     const status = statusMap[orderStatus] || chalk.white(orderStatus);
 
-    console.log(chalk.bold.cyan(`\n  ═══ ${tradeOrderNo} ═══`) + `  ${status}`);
+    _log(chalk.bold.cyan(`\n  ═══ ${tradeOrderNo} ═══`) + `  ${status}`);
 
     for (const pax of passengers) {
       const p = pax.passenger;
@@ -342,7 +352,7 @@ function displayUpcomingTrips(trips) {
 
       // Passenger line
       const tktNo = p.tktNoList?.[0] || '--';
-      console.log(
+      _log(
         chalk.white(`  ✈ ${p.fullName}`) +
         chalk.gray(`  ${tktNo}`) +
         chalk.gray(`  (${p.passengerType === 'ADT' ? '成人' : p.passengerType})`)
@@ -366,13 +376,13 @@ function displayUpcomingTrips(trips) {
         const meal = seg.mealTypeDetail || '';
         const baggage = seg.baggageInfoList?.find(b => b.baggageType === '0')?.baggageWeight || '';
 
-        console.log(
+        _log(
           chalk.cyan(`    ${airline}${fltNo}`) +
           chalk.white(`  ${depDate}`) +
           chalk.white(`  ${depTime} → ${arrTime}`) +
           chalk.gray(`  ${duration}`)
         );
-        console.log(
+        _log(
           chalk.gray(`    ${depAirport}${depTerm} → ${arrAirport}${arrTerm}`) +
           chalk.gray(`  ${aircraft}`)
         );
@@ -381,12 +391,12 @@ function displayUpcomingTrips(trips) {
         const seatInfo = pax.seatInfo;
         const airportTime = seg.airportTimeList?.[0];
         if (seatInfo) {
-          console.log(chalk.green(`    座位: ${seatInfo}`));
+          _log(chalk.green(`    座位: ${seatInfo}`));
         } else {
-          console.log(chalk.gray(`    座位: 未选座`));
+          _log(chalk.gray(`    座位: 未选座`));
         }
         if (airportTime?.boardingTime && airportTime.boardingTime !== '--') {
-          console.log(chalk.white(`    登机时间: ${airportTime.boardingTime}`));
+          _log(chalk.white(`    登机时间: ${airportTime.boardingTime}`));
         }
         if (seg.segStatus) {
           const segStatusMap = {
@@ -395,7 +405,7 @@ function displayUpcomingTrips(trips) {
             'BOARDED': chalk.green('已登机'),
             'USED': chalk.gray('已使用'),
           };
-          console.log(chalk.gray(`    状态: ${segStatusMap[seg.segStatus] || seg.segStatus}`));
+          _log(chalk.gray(`    状态: ${segStatusMap[seg.segStatus] || seg.segStatus}`));
         }
 
         // Cabin, meal, baggage
@@ -404,16 +414,16 @@ function displayUpcomingTrips(trips) {
         if (meal) extras.push(meal);
         if (baggage) extras.push(`托运${baggage}`);
         if (extras.length) {
-          console.log(chalk.gray(`    ${extras.join(' | ')}`));
+          _log(chalk.gray(`    ${extras.join(' | ')}`));
         }
 
         // Check-in / seat button status
         const seatBtn = pax.buttons?.find(b => b.type === 'SEAT');
         if (seatBtn) {
           if (seatBtn.state === 'normal') {
-            console.log(chalk.green(`    ✓ 可选座值机`));
+            _log(chalk.green(`    ✓ 可选座值机`));
           } else if (seatBtn.message) {
-            console.log(chalk.gray(`    选座: ${seatBtn.message}`));
+            _log(chalk.gray(`    选座: ${seatBtn.message}`));
           }
         }
       }
@@ -421,14 +431,14 @@ function displayUpcomingTrips(trips) {
 
     // Price
     if (price) {
-      console.log(chalk.white(`  价格: ¥${price}`));
+      _log(chalk.white(`  价格: ¥${price}`));
     }
     if (orderInfoDetail?.countDownTime > 0) {
       const mins = Math.floor(orderInfoDetail.countDownTime / 60);
-      console.log(chalk.yellow(`  ⏳ 支付倒计时: ${mins}分钟`));
+      _log(chalk.yellow(`  ⏳ 支付倒计时: ${mins}分钟`));
     }
   }
-  console.log();
+  _log();
 }
 
 module.exports = { displayFlights, displayBookingResult, displayUpcomingTrips, formatDate };

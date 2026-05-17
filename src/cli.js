@@ -363,7 +363,7 @@ program
   .option('-t, --to <city>', 'Arrival city (code or name, e.g. BJS, 北京)')
   .option('-d, --date <date>', 'Departure date (YYYY-MM-DD)')
   .option('-a, --adults <num>', 'Number of adults', parseInt)
-  .option('--flight <index>', 'Flight index from search results (0-based)', parseInt)
+  .option('--flight-no <flightNo>', 'Flight number to match (e.g. MU5101, CA8358)')
   .option('--cabin <index>', 'Cabin/brand index (0-based)', parseInt)
   .option('-p, --passenger <name>', 'Passenger name (must match saved passenger)')
   .option('--passenger-id <idNo>', 'Passenger ID number')
@@ -372,7 +372,7 @@ program
   .option('--contact-phone <phone>', 'Contact person phone')
   .option('-y, --yes', 'Skip confirmation prompt')
   .option('--config <path>', 'Config file path')
-  .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2025-06-15\n\n  # Fully specified (zero prompts):\n  $ ceair-cli book -f SHA -t BJS -d 2025-06-15 --flight 0 --cabin 0 \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2025-06-15 --flight 0 --cabin 0 -y\n\nTip: Run \"ceair-cli search\" first to see flight indices, then use --flight and --cabin.`)
+  .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15\n\n  # Match by flight number (zero prompts for flight):\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n\n  # Fully specified:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y`)
   .action(async (opts) => {
     const { loadConfig } = require('./config');
     const session = new SessionManager();
@@ -434,21 +434,34 @@ program
       if (flights.length === 0) { await session.cleanup(); return; }
 
       // ─── Flight selection ───
-      let flightIndex = opts.flight;
-      if (flightIndex == null) {
-        const answer = await inquirer.prompt([{
-          type: 'input', name: 'flightIndex',
-          message: `选择航班序号 (0-${flights.length - 1}):`,
-          validate: v => { const n = parseInt(v); return (n >= 0 && n < flights.length) || `请输入 0 到 ${flights.length - 1}`; },
-        }]);
-        flightIndex = parseInt(answer.flightIndex);
-      } else if (flightIndex < 0 || flightIndex >= flights.length) {
-        console.log(chalk.red(`航班序号 ${flightIndex} 超出范围 (0-${flights.length - 1})`));
-        await session.cleanup(); return;
-      }
+      let selectedFlight = null;
 
-      const selectedFlight = flights[flightIndex];
-      console.log(chalk.cyan(`\n已选: ${selectedFlight.flightNo} ${selectedFlight.depTime}→${selectedFlight.arrTime}`));
+      // Match by flight number if --flight-no is provided
+      if (opts.flightNo) {
+        const normalizedFlightNo = opts.flightNo.toUpperCase().replace(/\s+/g, '');
+        selectedFlight = flights.find(
+          f => f.flightNo.toUpperCase().replace(/\s+/g, '') === normalizedFlightNo
+        );
+        if (!selectedFlight) {
+          console.log(chalk.red(`未找到航班号 ${opts.flightNo}。请检查航班号或使用交互模式选择。`));
+          console.log(chalk.gray('可用航班:'));
+          for (const f of flights) {
+            console.log(chalk.gray(`  [${f.index}] ${f.flightNo} ${f.depTime}→${f.arrTime}`));
+          }
+          await session.cleanup(); return;
+        }
+        console.log(chalk.cyan(`\n匹配到: [${selectedFlight.index}] ${selectedFlight.flightNo} ${selectedFlight.depTime}→${selectedFlight.arrTime}`));
+      } else {
+        const answer = await inquirer.prompt([{
+          type: 'list', name: 'flightIndex', message: '选择航班:',
+          choices: flights.map(f => ({
+            name: `${f.flightNo}  ${f.depTime}→${f.arrTime}  ¥${f.lowestPrice || '--'}`,
+            value: f.index,
+          })),
+        }]);
+        selectedFlight = flights[answer.flightIndex];
+        console.log(chalk.cyan(`\n已选: ${selectedFlight.flightNo} ${selectedFlight.depTime}→${selectedFlight.arrTime}`));
+      }
 
       // ─── Cabin selection ───
       let cabinIdx = opts.cabin;
@@ -510,8 +523,8 @@ program
         Object.assign(contact, answers);
       }
 
-      // Find cabin index in flight data
-      const flightItem = result.data?.flightItems?.[flightIndex];
+      // Find cabin index in flight data using flightItemIndex (not display index)
+      const flightItem = result.data?.flightItems?.[selectedFlight.flightItemIndex];
       let realCabinIdx = 0;
       if (flightItem) {
         realCabinIdx = flightItem.cabinInfoDescs?.findIndex(c => c.ccode === selectedBrand.cabin);
@@ -527,6 +540,25 @@ program
       console.log(chalk.white(`乘机人: ${pax.name} (${pax.idNo})`));
       console.log(chalk.white(`联系人: ${contact.name} ${contact.phone}`));
 
+      // Safety check: verify flight number matches the API response at flightItemIndex
+      const verifyItem = result.data?.flightItems?.[selectedFlight.flightItemIndex];
+      if (verifyItem) {
+        const verifySeg = verifyItem.flightInfos?.[0]?.flightSegments?.[0];
+        if (verifySeg) {
+          const verifyNo = (verifySeg.carrierCode || verifySeg.airlineCode || '') + verifySeg.flightNo;
+          if (verifyNo !== selectedFlight.flightNo) {
+            console.log(chalk.yellow(`\n⚠ 警告: API数据中航班号 ${verifyNo} 与所选 ${selectedFlight.flightNo} 不匹配！`));
+            console.log(chalk.yellow('  可能是搜索结果发生了变化。建议使用 --flight-no 重新订票。'));
+            if (!opts.yes) {
+              const { forceContinue } = await inquirer.prompt([{
+                type: 'confirm', name: 'forceContinue', message: '航班号不匹配，仍要继续?', default: false,
+              }]);
+              if (!forceContinue) { console.log(chalk.yellow('已取消。')); await session.cleanup(); return; }
+            }
+          }
+        }
+      }
+
       if (!opts.yes) {
         const { confirmBook } = await inquirer.prompt([{
           type: 'confirm', name: 'confirmBook', message: '确认提交订单?', default: false,
@@ -538,7 +570,7 @@ program
       const bookSpinner = ora('正在提交订单...').start();
       const bookingResult = await session.api.createBooking({
         searchResult: result,
-        flightIndex,
+        flightItemIndex: selectedFlight.flightItemIndex,
         cabinIndex: realCabinIdx,
         passenger: pax,
         contact,
@@ -902,8 +934,8 @@ program
     'China Eastern Airlines CLI - Search, Login & Book\n\n' +
     'Quick start:\n' +
     '  1. ceair-cli login --method qrcode\n' +
-    '  2. ceair-cli search SHA BJS 2025-06-15\n' +
-    '  3. ceair-cli book -f SHA -t BJS -d 2025-06-15 --flight 0 --cabin 0 -y\n\n' +
+    '  2. ceair-cli search SHA BJS 2026-06-15\n' +
+    '  3. ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n\n' +
     'Config defaults:\n' +
     '  ceair-cli config set passenger.name 张三\n' +
     '  ceair-cli config set passenger.phone 13800138000\n' +
