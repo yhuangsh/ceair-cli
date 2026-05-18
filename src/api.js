@@ -404,7 +404,6 @@ class CeairApi {
       let ptrCountInCurrentFlight = 0;
       let targetButtonIdx = -1;
       let globalPtrIdx = 0;
-      const debug = [];
 
       for (const item of allItems) {
         // Detect flight boundary: walk up to find flight number
@@ -424,9 +423,6 @@ class CeairApi {
         }
 
         if (flightNo !== lastFlightNo) {
-          if (currentFlightIdx >= flightItemIndex - 1 && currentFlightIdx <= flightItemIndex + 1) {
-            debug.push({fi: currentFlightIdx, fn: lastFlightNo, ptrs: ptrCountInCurrentFlight});
-          }
           currentFlightIdx++;
           lastFlightNo = flightNo;
           ptrCountInCurrentFlight = 0;
@@ -444,15 +440,10 @@ class CeairApi {
         }
         globalPtrIdx++;
       }
-      // Add last flight
-      debug.push({fi: currentFlightIdx, fn: lastFlightNo, ptrs: ptrCountInCurrentFlight});
-
-      return { targetButtonIdx, debug, totalItems: allItems.length };
+      return targetButtonIdx;
     }, { flightItemIndex, cabinIndex });
 
-    console.error('[booking] DOM scan result:', JSON.stringify(domOffset));
-
-    if (domOffset.targetButtonIdx < 0) {
+    if (domOffset < 0) {
       throw new Error(`无法定位到航班 ${expectedFlightNo} 的第 ${cabinIndex} 个舱位按钮`);
     }
 
@@ -485,16 +476,16 @@ class CeairApi {
     await page.evaluate((idx) => {
       const btns = document.querySelectorAll('.cabin-select.pointer');
       if (btns[idx]) btns[idx].scrollIntoView({ block: 'center' });
-    }, domOffset.targetButtonIdx);
+    }, domOffset);
     await page.waitForTimeout(500);
 
     // Click the target cabin price
     const priceButtons = await page.locator('.cabin-select.pointer').all();
-    if (domOffset.targetButtonIdx >= priceButtons.length) {
+    if (domOffset >= priceButtons.length) {
       throw new Error('无法定位到所选航班的价格按钮');
     }
 
-    await priceButtons[domOffset.targetButtonIdx].click({ force: true });
+    await priceButtons[domOffset].click({ force: true });
     await page.waitForResponse(
       (resp) => resp.url().includes('fareDetail'),
       { timeout: 15000 }
@@ -506,7 +497,7 @@ class CeairApi {
     const selectVisible = await selectBtn.isVisible().catch(() => false);
     if (!selectVisible) {
       await this._dismissModals();
-      await priceButtons[domOffset.targetButtonIdx].click({ force: true });
+      await priceButtons[domOffset].click({ force: true });
       await page.waitForResponse(
         (resp) => resp.url().includes('fareDetail'),
         { timeout: 15000 }

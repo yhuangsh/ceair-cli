@@ -30,18 +30,20 @@ Chromium is auto-installed on first `npm install` via Playwright.
 ## Quick Start
 
 ```bash
-# 1. Login
-ceair-cli login --method qrcode
+# 1. Start a browser session (scans QR code to login)
+ceair-cli session start
 
 # 2. Search
 ceair-cli search SHA BJS 2026-06-15
 
 # 3. Book (match by flight number, zero prompts)
-ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \
-  -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y
 
 # 4. Check upcoming trips
 ceair-cli orders
+
+# 5. Stop the browser when done
+ceair-cli session stop
 ```
 
 ## Commands
@@ -56,15 +58,17 @@ ceair-cli search 上海 北京 2026-06-15 --cabin C
 ceair-cli search SHA CAN 2026-06-15 --return 2026-06-20
 ```
 
-### `ceair-cli login`
+### `ceair-cli session`
 
-Login via QR code (recommended), SMS, or password.
+Manage persistent browser sessions via CDP.
 
 ```bash
-ceair-cli login --method qrcode    # Scan QR in terminal
-ceair-cli login -m sms             # Phone verification
-ceair-cli login -m password        # Account + password
+ceair-cli session start   # Launch Chromium, QR login, keep browser alive
+ceair-cli session status  # Show session info (PID, user, endpoint)
+ceair-cli session stop    # Kill browser process
 ```
+
+All other commands require an active session. The browser persists across commands — zero startup overhead per invocation.
 
 ### `ceair-cli book`
 
@@ -110,7 +114,7 @@ ceair-cli config list
 ```bash
 ceair-cli status            # Check login status
 ceair-cli cancel <orderNo>  # Cancel unpaid order
-ceair-cli logout            # Clear session
+ceair-cli session stop      # Close browser session
 ceair-cli cities            # List supported city codes
 ```
 
@@ -137,17 +141,28 @@ Orders are created in **unpaid** state. Complete payment on the [CEAir website](
 - **Non-MU booking**: Search and display work for all airlines (CA, CZ, FM, HO, KN, etc.), but **booking only works for MU-operated flights**. Codeshare/other-carrier flights fail at the addServices submit step (compiled Vue code accesses flight product data differently). This is a known issue (Bug #3).
 - **Cancel order**: Some orders (e.g., already ticketed) return A500 from the API — cancel via the website instead.
 
+### Bug History
+
+| Bug | Description | Fixed |
+|-----|-------------|-------|
+| #1 | Cabin offset calculated wrong for variable cabin counts | v1.1.0 |
+| #2 | Date picker not filling for future months | v1.1.0 |
+| #3 | Non-MU flights crash at addServices.submit() | Open |
+| #4 | cancelOrder fails on ERROR/FETCH_ERROR | v1.1.0 |
+| #5 | localStorage/sessionStorage not cleared on logout | v1.1.0 |
+| #6 | DOM cabin offset uses API counts instead of actual DOM elements — booked wrong cabin (¥4,180 instead of ¥550) | v1.2.0 |
+
 ## Architecture
 
 ```
 src/
-├── cli.js        # CLI commands (Commander.js)
-├── api.js        # Playwright browser automation
-├── session.js    # Login session persistence
-├── config.js     # User config (~/.config/ceair-cli/)
-├── paths.js      # Shared paths + migration
-├── cities.js     # City/airport code mapping
-└── display.js    # Terminal output formatting
+├── cli.js          # CLI commands (Commander.js)
+├── api.js          # Playwright browser automation
+├── browser-pool.js # Browser session management (CDP)
+├── config.js       # User config (~/.config/ceair-cli/)
+├── paths.js        # Shared paths + migration
+├── cities.js       # City/airport code mapping
+└── display.js      # Terminal output formatting
 ```
 
 ## Development Wiki
