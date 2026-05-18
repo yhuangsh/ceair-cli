@@ -987,21 +987,45 @@ class CeairApi {
       throw new Error('未能进入增值服务页面，请重试');
     }
 
-    // Set contact info in Vuex state
-    await page.evaluate((contactInfo) => {
+    // Set contact info AND passenger selection in Vuex state
+    await page.evaluate((paxInfo) => {
       const store = window.$nuxt.$store;
       const flight = store.state.flight;
       const contact = {
-        id: 0, userId: 0, name: contactInfo.name,
-        mobile: contactInfo.phone, email: null, versionNum: null,
+        id: 0, userId: 0, name: paxInfo.name,
+        mobile: paxInfo.phone, email: null, versionNum: null,
       };
       flight.selectContact = contact;
       flight.contactParam = {
-        contactName: contactInfo.name,
-        contactMobile: contactInfo.phone,
+        contactName: paxInfo.name,
+        contactMobile: paxInfo.phone,
         contactMobCountry: '86',
       };
-    }, { name: passenger.name, phone: passenger.phone || contact?.phone || '' });
+      // Also set selectPassengers — the submit() function reads .name from this
+      // For MU flights, the UI passenger click sets this with full data, but for
+      // codeshares it may only have {name}. Reconstruct from passengerParam.
+      const existingPax = flight.selectPassengers;
+      const paxParam = flight.passengerParam?.paxs?.[0];
+      if (!existingPax || !existingPax[0]?.certNo) {
+        flight.selectPassengers = [{
+          id: paxParam?.favorPaxIdDtoList?.[0]?.id || 0,
+          userId: 0,
+          name: paxInfo.name,
+          certType: 'NI',
+          certNo: paxInfo.idNo || paxParam?.certNo || '',
+          certValidity: paxParam?.certValidity || '',
+          birthday: paxParam?.birthday || '',
+          mobile: paxInfo.phone,
+          email: paxParam?.email || null,
+          nationality: paxParam?.nationality || 'CN',
+          gender: paxParam?.gender || '',
+          firstName: paxParam?.firstName || '',
+          lastName: paxParam?.lastName || '',
+          firstNameEn: paxParam?.firstNameEn || '',
+          lastNameEn: paxParam?.lastNameEn || '',
+        }];
+      }
+    }, { name: passenger.name, phone: passenger.phone || contact?.phone || '', idNo: passenger.idNo });
 
     // Listen for the booking API response
     let bookingResponse = null;
@@ -1011,6 +1035,12 @@ class CeairApi {
       }
     };
     page.on('response', responseHandler);
+
+    // Verify we're on the addServices page
+    const addServicesRoute = await page.evaluate(() => window.$nuxt?.$route?.name);
+    if (addServicesRoute !== 'addServices') {
+      throw new Error('未能进入增值服务页面，请重试');
+    }
 
     // Call submit() on the addServices component
     await page.evaluate(() => {
