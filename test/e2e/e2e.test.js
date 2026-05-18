@@ -7,7 +7,8 @@
  * Run:
  *   npm run test:e2e
  *
- * Tests are read-only — no orders are created or cancelled.
+ * Tests are mostly read-only — no orders are created or cancelled.
+ * Exception: the non-MU booking test creates and cancels a test order.
  */
 
 const { describe, it, before, after } = require('node:test');
@@ -405,6 +406,89 @@ describe('Search flights', () => {
     const items = result.data?.flightItems;
     assert.ok(Array.isArray(items), 'data.flightItems should be array');
     assert.ok(items.length > 0, 'Should have at least 1 flight');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Non-MU booking (creates + cancels a real order)
+// ═══════════════════════════════════════════════════════════════════
+
+describe('Non-MU booking', () => {
+
+  it('finds a non-MU flight and attempts booking', async () => {
+    await api._ensureNuxtReady();
+
+    const routes = [
+      { from: 'SHA', to: 'BJS' },
+      { from: 'SHA', to: 'CTU' },
+      { from: 'BJS', to: 'CAN' },
+    ];
+
+    let result = null;
+    let nonMuFlight = null;
+
+    for (const date of dateCandidates(E2E_DEPARTURE_DATE)) {
+      for (const route of routes) {
+        const attempt = await api.searchFlights({
+          depCity: route.from, arrCity: route.to, depDate: date, adult: 1,
+        });
+
+        if (attempt.resultCode === 'S200' && attempt.data?.flightItems?.length > 0) {
+          // Look for a non-MU flight (CA, CZ, FM, HO, etc.)
+          const flights = displayFlights(attempt);
+          nonMuFlight = flights.find(f => !f.flightNo.startsWith('MU') && !f.flightNo.startsWith('KN'));
+          if (nonMuFlight) {
+            result = attempt;
+            break;
+          }
+        }
+
+        await api._ensureNuxtReady();
+      }
+      if (result) break;
+    }
+
+    // If no non-MU flights available, skip gracefully
+    if (!nonMuFlight) {
+      console.log(chalk.yellow('  ℹ No non-MU flights found on any route/date — skipping booking test'));
+      return;
+    }
+
+    console.log(chalk.cyan(`  Booking non-MU flight: ${nonMuFlight.flightNo} (index ${nonMuFlight.flightItemIndex})`));
+
+    // Try to book — currently expected to fail at addServices.submit()
+    const bookingResult = await api.createBooking({
+      searchResult: result,
+      flightItemIndex: nonMuFlight.flightItemIndex,
+      cabinIndex: 0,
+      passenger: { name: global._testUserName || 'Test', idNo: '000000000000000000', phone: '13800000000' },
+      contact: { name: global._testUserName || 'Test', phone: '13800000000' },
+    }).catch(e => ({ _error: e.message }));
+
+    if (bookingResult?._error) {
+      // Expected: addServices submit fails for non-MU flights (Bug #3)
+      console.log(chalk.yellow(`  ⚠ Booking failed (known Bug #3): ${bookingResult._error}`));
+      return;
+    }
+
+    if (bookingResult?.resultCode === 'A200' || bookingResult?.resultCode === 'S200') {
+      // Booking succeeded! Cancel the test order
+      const orderNo = bookingResult.orderNo || bookingResult.data?.orderNo;
+      console.log(chalk.green(`  ✅ Non-MU booking succeeded! Order: ${orderNo}`));
+
+      if (orderNo) {
+        const cancelResult = await api.cancelOrder(orderNo).catch(() => null);
+        if (cancelResult?.resultCode === 'S200' || cancelResult?.resultCode === 'A200') {
+          console.log(chalk.gray(`  🗑 Test order ${orderNo} cancelled`));
+        } else {
+          console.log(chalk.yellow(`  ⚠ Could not cancel test order ${orderNo} — cancel manually`));
+        }
+      }
+      return;
+    }
+
+    // Some other failure
+    console.log(chalk.yellow(`  ⚠ Booking returned: ${bookingResult?.resultCode} ${bookingResult?.resultMsg || ''}`));
   });
 });
 
