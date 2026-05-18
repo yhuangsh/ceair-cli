@@ -832,25 +832,32 @@ class CeairApi {
     }
     targetCabinOffset += cabinIndex;
 
-    // ─── Verify flight number on the page matches the expected flight ───
-    // The shopping page shows flight cards. We verify the expected flight exists
-    // by checking text content of the page (flight numbers are prominently displayed).
+    // ─── Verify we're on the right search results page ───
+    // The shopping page URL contains the date (e.g. /shopping/SHA-BJS-2026-05-24)
+    // Flight numbers on the page may have spaces ("MU 5127") so text scanning is unreliable.
+    const currentUrl = page.url();
+    const expectedDate = expectedSeg?.fltDate || '';
+    const urlHasCorrectDate = currentUrl.includes(expectedDate) ||
+      // If we navigated, the date should be in the searchFlightQuery
+      await page.evaluate((d) => {
+        const sq = window.$nuxt?.$store?.state?.flight?.searchFlightQuery;
+        return sq?.date === d;
+      }, expectedDate);
+
+    // Also check if the expected flight number appears (with or without space)
     const domVerified = await page.evaluate((expectedFlightNo) => {
-      // Check all elements that might contain flight numbers
       const allText = document.body.innerText;
-      // Flight numbers like MU5127, CA1508 appear as standalone tokens
-      const flightNoPattern = /\b[A-Z]{1,2}\d{3,5}\b/g;
-      const pageFlightNos = allText.match(flightNoPattern) || [];
-      return {
-        pageFlightNos: [...new Set(pageFlightNos)],
-        hasExpected: pageFlightNos.includes(expectedFlightNo),
-      };
+      // Try both "MU5127" and "MU 5127" formats
+      const noSpace = allText.includes(expectedFlightNo);
+      const withSpace = allText.includes(
+        expectedFlightNo.replace(/^([A-Z]+)(\d+)$/, '$1 $2')
+      );
+      return { noSpace, withSpace, hasExpected: noSpace || withSpace };
     }, expectedFlightNo);
 
-    if (!domVerified.hasExpected) {
-      // Page doesn't show the expected flight — search results may be stale
+    if (!domVerified.hasExpected && !urlHasCorrectDate) {
       throw new Error(
-        `页面未找到航班 ${expectedFlightNo}（页面上有: ${domVerified.pageFlightNos.join(', ')}）。` +
+        `页面验证失败：未找到航班 ${expectedFlightNo}，URL=${currentUrl}。` +
         `搜索结果可能已过期，请重新搜索。`
       );
     }
