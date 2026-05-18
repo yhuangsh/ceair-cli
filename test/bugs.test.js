@@ -558,12 +558,10 @@ describe('Cabin resolver', () => {
       assert.equal(r2.index, 1);
     });
 
-    it('resolves by cabin code', () => {
-      const r = resolveCabinIndex('V', priceOptions);
-      assert.equal(r.index, 0);
-
-      const r2 = resolveCabinIndex('C', priceOptions);
-      assert.equal(r2.index, 1);
+    it('fare subclass codes are not accepted', () => {
+      // V is a fare booking code within economy, not a cabin class
+      assert.equal(resolveCabinIndex('V', priceOptions), null);
+      assert.equal(resolveCabinIndex('Z', priceOptions), null);
     });
 
     it('resolves by short code Y/C/F via cabinType', () => {
@@ -574,19 +572,8 @@ describe('Cabin resolver', () => {
       assert.equal(r2.index, 1);
     });
 
-    it('supports legacy numeric index', () => {
-      const r = resolveCabinIndex('0', priceOptions);
-      assert.equal(r.index, 0);
-
-      const r2 = resolveCabinIndex('1', priceOptions);
-      assert.equal(r2.index, 1);
-    });
-
     it('returns null for unknown cabin', () => {
       assert.equal(resolveCabinIndex('spaceship', priceOptions), null);
-    });
-
-    it('returns null for out-of-range index', () => {
       assert.equal(resolveCabinIndex('5', priceOptions), null);
     });
 
@@ -598,7 +585,7 @@ describe('Cabin resolver', () => {
     it('handles 3-cabin flights (economy, premium, business)', () => {
       const opts = [
         { brand: '经济舱', cabin: 'Y', cabinType: 'Y', price: 550 },
-        { brand: '超级经济舱', cabin: 'W', cabinType: 'Y', price: 1200 },
+        { brand: '超级经济舱', cabin: 'W', cabinType: 'W', price: 1200 },
         { brand: '公务舱', cabin: 'C', cabinType: 'J', price: 3483 },
       ];
       assert.equal(resolveCabinIndex('economy', opts).index, 0);

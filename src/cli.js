@@ -389,7 +389,7 @@ program
   .option('-d, --date <date>', 'Departure date (YYYY-MM-DD)')
   .option('-a, --adults <num>', 'Number of adults', parseInt)
   .option('--flight-no <flightNo>', 'Flight number to match (e.g. MU5101, CA8358)')
-  .option('--cabin <class>', 'Cabin class: economy/Y(经济), business/C(商务), first/F(头等), premium/W(超经), or numeric index')
+  .option('--cabin <class>', 'Cabin class: economy/Y(经济), business/C(商务), first/F(头等), premium/W(超经)')
   .option('-p, --passenger <name>', 'Passenger name (must match saved passenger)')
   .option('--passenger-id <idNo>', 'Passenger ID number')
   .option('--passenger-phone <phone>', 'Passenger phone number')
@@ -397,7 +397,7 @@ program
   .option('--contact-phone <phone>', 'Contact person phone')
   .option('-y, --yes', 'Skip confirmation prompt')
   .option('--config <path>', 'Config file path')
-  .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15\n\n  # Match by flight number (zero prompts for flight):\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y\n\n  # Fully specified:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y`)
+  .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15\n\n  # Match by flight number (zero prompts for flight):\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y\n\n  # Fully specified:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y`)
   .action(async (opts) => {
     const { loadConfig } = require('./config');
     const api = requireApi();
@@ -488,7 +488,7 @@ program
         const resolved = resolveCabinIndex(opts.cabin, selectedFlight.priceOptions);
         if (!resolved) {
           console.log(chalk.red(
-            `未找到舱位 "${opts.cabin}"。可选: ${selectedFlight.priceOptions.map(p => p.brand + '(' + p.cabin + ')').join(', ')}`
+            `未找到舱位 "${opts.cabin}"。可选: ${selectedFlight.priceOptions.map(p => p.brand).join(', ')}`
           ));
           return;
         }
@@ -498,7 +498,7 @@ program
         const answer = await inquirer.prompt([{
           type: 'list', name: 'brandIndex', message: '选择舱位/品牌:',
           choices: selectedFlight.priceOptions.map((p, i) => ({
-            name: `${p.brand} (${p.cabin}) - ¥${p.price}`, value: i,
+            name: `${p.brand} - ¥${p.price}`, value: i,
           })),
         }]);
         cabinIdx = answer.brandIndex;
@@ -551,7 +551,7 @@ program
       console.log(chalk.bold('\n═══ 订单确认 ═══'));
       console.log(chalk.white(`航班: ${selectedFlight.flightNo} ${getCityName(depCity)}→${getCityName(arrCity)}`));
       console.log(chalk.white(`日期: ${formatDate(fields.date)}`));
-      console.log(chalk.white(`舱位: ${selectedBrand.brand} (${selectedBrand.cabin})`));
+      console.log(chalk.white(`舱位: ${selectedBrand.brand}`));
       console.log(chalk.white(`价格: ¥${selectedBrand.price}`));
       console.log(chalk.white(`乘机人: ${pax.name} (${pax.idNo})`));
       console.log(chalk.white(`联系人: ${contact.name} ${contact.phone}`));

@@ -1,5 +1,5 @@
 /**
- * Cabin class resolution — maps friendly names to airline codes.
+ * Cabin class resolution — maps friendly names to airline cabin types.
  *
  * Accepts:
  *   Full names:   economy, business, first, premium
@@ -8,6 +8,11 @@
  *   Mixed:        经济舱/Y, business/C
  *
  * All comparisons are case-insensitive.
+ *
+ * Note on fare subclass codes (V, Z, I, etc.):
+ *   These are internal airline booking class codes within a cabin.
+ *   For example: Y=economy, V=discounted economy, Z=another economy fare bucket.
+ *   Users should never need to know these — they select cabin CLASS only.
  */
 
 /** Canonical cabin classes */
@@ -53,6 +58,19 @@ function cabinLabel(input) {
 }
 
 /**
+ * Map a ctype code to a canonical class key.
+ * ctype is the airline's cabin type field: Y=economy, J=business, F=first, W=premium.
+ */
+function classFromCtype(ctype) {
+  if (!ctype) return null;
+  const upper = ctype.toUpperCase();
+  for (const [key, cls] of Object.entries(CABIN_CLASSES)) {
+    if (cls.codes.includes(upper)) return key;
+  }
+  return null;
+}
+
+/**
  * Find the index of a cabin option in a flight's priceOptions array.
  *
  * @param {string} input - User-supplied cabin name/code
@@ -60,44 +78,24 @@ function cabinLabel(input) {
  * @returns {{ index: number, option: object } | null}
  *
  * Matching priority:
- *   1. Exact numeric index (legacy: --cabin 0, --cabin 1)
- *   2. Exact cabin code match (e.g. "V", "C0")
- *   3. Canonical class match via cabinType (Y→economy, J→business, F→first)
- *   4. Brand name substring match (e.g. "经济" matches "经济舱")
+ *   1. Canonical class match via cabinType (Y→economy, J→business, F→first)
+ *   2. Brand name substring match (e.g. "经济" matches "经济舱")
  */
 function resolveCabinIndex(input, priceOptions) {
   if (!priceOptions || priceOptions.length === 0) return null;
 
-  // 1. Legacy numeric index
-  const num = parseInt(input, 10);
-  if (!isNaN(num) && String(num) === String(input).trim()) {
-    if (num >= 0 && num < priceOptions.length) {
-      return { index: num, option: priceOptions[num] };
-    }
-    return null;
-  }
-
   const cls = resolveCabinClass(input);
+  if (!cls) return null;
 
-  // 2. Exact cabin code match (e.g. "V", "C", "Y")
-  const upper = String(input).trim().toUpperCase();
-  const codeMatch = priceOptions.findIndex(p =>
-    p.cabin?.toUpperCase() === upper
+  // 1. Match by cabinType (ctype)
+  const { codes } = CABIN_CLASSES[cls];
+  const typeMatch = priceOptions.findIndex(p =>
+    codes.includes(p.cabinType?.toUpperCase())
   );
-  if (codeMatch >= 0) return { index: codeMatch, option: priceOptions[codeMatch] };
+  if (typeMatch >= 0) return { index: typeMatch, option: priceOptions[typeMatch] };
 
-  // 3. Canonical class → match by cabinType
-  if (cls) {
-    const { codes } = CABIN_CLASSES[cls];
-    const typeMatch = priceOptions.findIndex(p =>
-      codes.includes(p.cabinType?.toUpperCase()) ||
-      codes.includes(p.cabin?.toUpperCase())
-    );
-    if (typeMatch >= 0) return { index: typeMatch, option: priceOptions[typeMatch] };
-  }
-
-  // 4. Brand name substring
-  const label = cls ? CABIN_CLASSES[cls].label : upper;
+  // 2. Brand name substring
+  const label = CABIN_CLASSES[cls].label;
   const brandMatch = priceOptions.findIndex(p =>
     p.brand?.includes(label) || label.includes(p.brand || '')
   );
@@ -106,4 +104,4 @@ function resolveCabinIndex(input, priceOptions) {
   return null;
 }
 
-module.exports = { resolveCabinClass, cabinSearchCode, cabinLabel, resolveCabinIndex, CABIN_CLASSES };
+module.exports = { resolveCabinClass, cabinSearchCode, cabinLabel, resolveCabinIndex, classFromCtype, CABIN_CLASSES };

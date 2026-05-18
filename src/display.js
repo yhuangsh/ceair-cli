@@ -246,7 +246,7 @@ function displayLegacyFormat(tripList) {
         );
         if (priceOptions.length > 0) {
           const priceLine = priceOptions
-            .map((p) => `${p.brand}/${p.cabin}: ¥${p.price}`)
+            .map((p) => `${p.brand}: ¥${p.price}(含税¥${p.totalPrice})`)
             .join(' | ');
           _log(chalk.gray(`     ${priceLine}`));
         }
