@@ -37,7 +37,7 @@ ceair-cli session start
 ceair-cli search SHA BJS 2026-06-15
 
 # 3. Book (match by flight number, zero prompts)
-ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y
 
 # 4. Check upcoming trips
 ceair-cli orders
@@ -54,7 +54,7 @@ Search flights. Cities can be codes or Chinese names.
 
 ```bash
 ceair-cli search SHA BJS 2026-06-15
-ceair-cli search 上海 北京 2026-06-15 --cabin C
+ceair-cli search 上海 北京 2026-06-15 --cabin business
 ceair-cli search SHA CAN 2026-06-15 --return 2026-06-20
 ```
 
@@ -82,10 +82,10 @@ ceair-cli book
 ceair-cli book -f SHA -t BJS -d 2026-06-15
 
 # Match by flight number (recommended)
-ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y
 
 # Fully specified with config defaults
-ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \
+ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy \
   -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y
 ```
 

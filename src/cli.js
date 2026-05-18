@@ -227,7 +227,7 @@ async function sessionStart(opts) {
 
       console.log(chalk.gray('\n浏览器会话已启动。使用以下命令操作：'));
       console.log(chalk.cyan('  ceair-cli search SHA BJS 2026-06-15'));
-      console.log(chalk.cyan('  ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y'));
+      console.log(chalk.cyan('  ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y'));
       console.log(chalk.cyan('  ceair-cli orders'));
       console.log(chalk.gray('\n完成后执行 ceair-cli session stop 关闭浏览器。'));
 
@@ -318,8 +318,8 @@ program
   .option('-r, --return <retDate>', 'Return date (for round-trip)')
   .option('-a, --adults <num>', 'Number of adults', '1')
   .option('-c, --children <num>', 'Number of children', '0')
-  .option('--cabin <class>', 'Cabin class: Y(经济) C(商务) F(头等)', 'Y')
-  .addHelpText('after', `\nExamples:\n  $ ceair-cli search SHA BJS 2025-06-15\n  $ ceair-cli search 上海 北京 2025-06-15 --cabin C\n  $ ceair-cli search SHA BJS 2025-06-15 -r 2025-06-20\n\nUse "ceair-cli cities" to see all supported city codes.`)
+  .option('--cabin <class>', 'Cabin: economy/Y(经济), business/C(商务), first/F(头等), premium/W(超经)', 'economy')
+  .addHelpText('after', `\nExamples:\n  $ ceair-cli search SHA BJS 2025-06-15\n  $ ceair-cli search 上海 北京 2025-06-15 --cabin business\n  $ ceair-cli search SHA BJS 2025-06-15 --cabin 商务\n  $ ceair-cli search SHA BJS 2025-06-15 -r 2025-06-20\n\nCabin names: economy/econ/Y/经济舱, business/biz/C/商务舱, first/F/头等舱, premium/W/超经\nUse "ceair-cli cities" to see all supported city codes.`)
   .action(async (from, to, date, opts) => {
     const depCity = resolveCity(from);
     const arrCity = resolveCity(to);
@@ -351,7 +351,7 @@ program
         retDate: opts.return,
         adult: parseInt(opts.adults),
         child: parseInt(opts.children),
-        cabin: opts.cabin,
+        cabin: require('./cabin').cabinSearchCode(opts.cabin),
       });
 
       spinner.stop();
@@ -389,7 +389,7 @@ program
   .option('-d, --date <date>', 'Departure date (YYYY-MM-DD)')
   .option('-a, --adults <num>', 'Number of adults', parseInt)
   .option('--flight-no <flightNo>', 'Flight number to match (e.g. MU5101, CA8358)')
-  .option('--cabin <index>', 'Cabin/brand index (0-based)', parseInt)
+  .option('--cabin <class>', 'Cabin class: economy/Y(经济), business/C(商务), first/F(头等), premium/W(超经), or numeric index')
   .option('-p, --passenger <name>', 'Passenger name (must match saved passenger)')
   .option('--passenger-id <idNo>', 'Passenger ID number')
   .option('--passenger-phone <phone>', 'Passenger phone number')
@@ -397,7 +397,7 @@ program
   .option('--contact-phone <phone>', 'Contact person phone')
   .option('-y, --yes', 'Skip confirmation prompt')
   .option('--config <path>', 'Config file path')
-  .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15\n\n  # Match by flight number (zero prompts for flight):\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n\n  # Fully specified:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y`)
+  .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15\n\n  # Match by flight number (zero prompts for flight):\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y\n\n  # Fully specified:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y`)
   .action(async (opts) => {
     const { loadConfig } = require('./config');
     const api = requireApi();
@@ -475,7 +475,8 @@ program
       }
 
       // ─── Cabin selection ───
-      let cabinIdx = opts.cabin;
+      const { resolveCabinIndex, cabinLabel } = require('./cabin');
+      let cabinIdx = null;
       let selectedBrand = null;
       if (selectedFlight.priceOptions.length === 0) {
         console.log(chalk.red('该航班无可用舱位'));
@@ -483,12 +484,16 @@ program
       } else if (selectedFlight.priceOptions.length === 1) {
         selectedBrand = selectedFlight.priceOptions[0];
         cabinIdx = 0;
-      } else if (cabinIdx != null) {
-        if (cabinIdx < 0 || cabinIdx >= selectedFlight.priceOptions.length) {
-          console.log(chalk.red(`舱位序号 ${cabinIdx} 超出范围`));
+      } else if (opts.cabin != null) {
+        const resolved = resolveCabinIndex(opts.cabin, selectedFlight.priceOptions);
+        if (!resolved) {
+          console.log(chalk.red(
+            `未找到舱位 "${opts.cabin}"。可选: ${selectedFlight.priceOptions.map(p => p.brand + '(' + p.cabin + ')').join(', ')}`
+          ));
           return;
         }
-        selectedBrand = selectedFlight.priceOptions[cabinIdx];
+        cabinIdx = resolved.index;
+        selectedBrand = resolved.option;
       } else {
         const answer = await inquirer.prompt([{
           type: 'list', name: 'brandIndex', message: '选择舱位/品牌:',
@@ -780,7 +785,7 @@ program
     '    passenger.idNo     Default passenger ID\n' +
     '    passenger.phone    Default passenger phone\n' +
     '    search.adults      Default adults (1)\n' +
-    '    search.cabin       Default cabin (Y/C/F)')
+    '    search.cabin       Default cabin (economy/business/first/premium)')
   .addHelpText('after', '\nExamples:\n  $ ceair-cli config list\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli config set passenger.phone 13800138000\n  $ ceair-cli config set passenger.idNo 110101199001011234\n  $ ceair-cli config get passenger.name')
   .action(async (action, key, value) => {
     const { loadConfig, setConfig, CONFIG_FILE } = require('./config');
@@ -882,7 +887,7 @@ program
     'Quick start:\n' +
     '  1. ceair-cli session start       # 启动浏览器并登录\n' +
     '  2. ceair-cli search SHA BJS 2026-06-15\n' +
-    '  3. ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n' +
+    '  3. ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin economy -y\n' +
     '  4. ceair-cli session stop        # 关闭浏览器\n\n' +
     'Config defaults:\n' +
     '  ceair-cli config set passenger.name 张三\n' +

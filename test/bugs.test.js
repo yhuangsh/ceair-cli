@@ -455,3 +455,155 @@ describe('Edge cases', () => {
     }
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// Cabin class resolver
+// ═══════════════════════════════════════════════════════════════
+
+const { resolveCabinClass, cabinSearchCode, cabinLabel, resolveCabinIndex } = require('../src/cabin');
+
+describe('Cabin resolver', () => {
+
+  describe('resolveCabinClass — friendly names to canonical class', () => {
+    it('accepts English full names', () => {
+      assert.equal(resolveCabinClass('economy'), 'economy');
+      assert.equal(resolveCabinClass('business'), 'business');
+      assert.equal(resolveCabinClass('first'), 'first');
+      assert.equal(resolveCabinClass('premium'), 'premium');
+    });
+
+    it('accepts short codes', () => {
+      assert.equal(resolveCabinClass('Y'), 'economy');
+      assert.equal(resolveCabinClass('y'), 'economy');
+      assert.equal(resolveCabinClass('C'), 'business');
+      assert.equal(resolveCabinClass('J'), 'business');
+      assert.equal(resolveCabinClass('F'), 'first');
+      assert.equal(resolveCabinClass('W'), 'premium');
+    });
+
+    it('accepts Chinese names', () => {
+      assert.equal(resolveCabinClass('经济舱'), 'economy');
+      assert.equal(resolveCabinClass('经济'), 'economy');
+      assert.equal(resolveCabinClass('商务舱'), 'business');
+      assert.equal(resolveCabinClass('商务'), 'business');
+      assert.equal(resolveCabinClass('公务舱'), 'business');
+      assert.equal(resolveCabinClass('头等舱'), 'first');
+      assert.equal(resolveCabinClass('头等'), 'first');
+      assert.equal(resolveCabinClass('超级经济舱'), 'premium');
+      assert.equal(resolveCabinClass('超级经济'), 'premium');
+      assert.equal(resolveCabinClass('超经'), 'premium');
+    });
+
+    it('accepts abbreviations', () => {
+      assert.equal(resolveCabinClass('econ'), 'economy');
+      assert.equal(resolveCabinClass('biz'), 'business');
+    });
+
+    it('returns null for unknown', () => {
+      assert.equal(resolveCabinClass('spaceship'), null);
+      assert.equal(resolveCabinClass('Z'), null);
+    });
+
+    it('returns economy for empty/null', () => {
+      assert.equal(resolveCabinClass(''), 'economy');
+      assert.equal(resolveCabinClass(null), 'economy');
+      assert.equal(resolveCabinClass(undefined), 'economy');
+    });
+  });
+
+  describe('cabinSearchCode — maps to airline search code', () => {
+    it('returns correct search codes', () => {
+      assert.equal(cabinSearchCode('economy'), 'Y');
+      assert.equal(cabinSearchCode('business'), 'C');
+      assert.equal(cabinSearchCode('first'), 'F');
+      assert.equal(cabinSearchCode('premium'), 'W');
+    });
+
+    it('works with Chinese input', () => {
+      assert.equal(cabinSearchCode('商务舱'), 'C');
+      assert.equal(cabinSearchCode('经济'), 'Y');
+    });
+  });
+
+  describe('cabinLabel — display labels', () => {
+    it('returns Chinese labels', () => {
+      assert.equal(cabinLabel('economy'), '经济舱');
+      assert.equal(cabinLabel('business'), '公务舱');
+      assert.equal(cabinLabel('first'), '头等舱');
+      assert.equal(cabinLabel('premium'), '超级经济舱');
+    });
+  });
+
+  describe('resolveCabinIndex — maps class to priceOption index', () => {
+    const priceOptions = [
+      { brand: '经济舱', cabin: 'V', cabinType: 'Y', price: 550 },
+      { brand: '公务舱', cabin: 'C', cabinType: 'J', price: 3483 },
+    ];
+
+    it('resolves by English name', () => {
+      const r = resolveCabinIndex('economy', priceOptions);
+      assert.equal(r.index, 0);
+      assert.equal(r.option.price, 550);
+
+      const r2 = resolveCabinIndex('business', priceOptions);
+      assert.equal(r2.index, 1);
+      assert.equal(r2.option.price, 3483);
+    });
+
+    it('resolves by Chinese name', () => {
+      const r = resolveCabinIndex('经济舱', priceOptions);
+      assert.equal(r.index, 0);
+
+      const r2 = resolveCabinIndex('公务', priceOptions);
+      assert.equal(r2.index, 1);
+    });
+
+    it('resolves by cabin code', () => {
+      const r = resolveCabinIndex('V', priceOptions);
+      assert.equal(r.index, 0);
+
+      const r2 = resolveCabinIndex('C', priceOptions);
+      assert.equal(r2.index, 1);
+    });
+
+    it('resolves by short code Y/C/F via cabinType', () => {
+      const r = resolveCabinIndex('Y', priceOptions);
+      assert.equal(r.index, 0);
+
+      const r2 = resolveCabinIndex('J', priceOptions);
+      assert.equal(r2.index, 1);
+    });
+
+    it('supports legacy numeric index', () => {
+      const r = resolveCabinIndex('0', priceOptions);
+      assert.equal(r.index, 0);
+
+      const r2 = resolveCabinIndex('1', priceOptions);
+      assert.equal(r2.index, 1);
+    });
+
+    it('returns null for unknown cabin', () => {
+      assert.equal(resolveCabinIndex('spaceship', priceOptions), null);
+    });
+
+    it('returns null for out-of-range index', () => {
+      assert.equal(resolveCabinIndex('5', priceOptions), null);
+    });
+
+    it('returns null for empty priceOptions', () => {
+      assert.equal(resolveCabinIndex('economy', []), null);
+      assert.equal(resolveCabinIndex('economy', null), null);
+    });
+
+    it('handles 3-cabin flights (economy, premium, business)', () => {
+      const opts = [
+        { brand: '经济舱', cabin: 'Y', cabinType: 'Y', price: 550 },
+        { brand: '超级经济舱', cabin: 'W', cabinType: 'Y', price: 1200 },
+        { brand: '公务舱', cabin: 'C', cabinType: 'J', price: 3483 },
+      ];
+      assert.equal(resolveCabinIndex('economy', opts).index, 0);
+      assert.equal(resolveCabinIndex('premium', opts).index, 1);
+      assert.equal(resolveCabinIndex('business', opts).index, 2);
+    });
+  });
+});
