@@ -558,10 +558,11 @@ describe('Cabin resolver', () => {
       assert.equal(r2.index, 1);
     });
 
-    it('fare subclass codes are not accepted', () => {
-      // V is a fare booking code within economy, not a cabin class
-      assert.equal(resolveCabinIndex('V', priceOptions), null);
-      assert.equal(resolveCabinIndex('Z', priceOptions), null);
+    it('fare subclass codes resolve to exact match', () => {
+      // V is a fare booking code within economy — exact match
+      const r = resolveCabinIndex('V', priceOptions);
+      assert.equal(r.index, 0);
+      assert.equal(r.option.cabin, 'V');
     });
 
     it('resolves by short code Y/C/F via cabinType', () => {
@@ -591,6 +592,70 @@ describe('Cabin resolver', () => {
       assert.equal(resolveCabinIndex('economy', opts).index, 0);
       assert.equal(resolveCabinIndex('premium', opts).index, 1);
       assert.equal(resolveCabinIndex('business', opts).index, 2);
+    });
+
+    it('picks cheapest subclass when given cabin class name', () => {
+      // CA1507-like: multiple economy subclasses at different prices
+      const opts = [
+        { brand: '经济舱', cabin: 'S', cabinType: 'Y', price: 930 },
+        { brand: '经济舱', cabin: 'V', cabinType: 'Y', price: 1300 },
+        { brand: '经济舱', cabin: 'K', cabinType: 'Y', price: 500 },
+        { brand: '公务舱', cabin: 'R', cabinType: 'J', price: 2260 },
+        { brand: '公务舱', cabin: 'J', cabinType: 'J', price: 8390 },
+      ];
+
+      // economy → cheapest economy = K @ ¥500
+      const eco = resolveCabinIndex('economy', opts);
+      assert.equal(eco.option.cabin, 'K');
+      assert.equal(eco.option.price, 500);
+
+      // business → cheapest business = R @ ¥2260
+      const biz = resolveCabinIndex('business', opts);
+      assert.equal(biz.option.cabin, 'R');
+      assert.equal(biz.option.price, 2260);
+
+      // 经济舱 → same as economy
+      const cn = resolveCabinIndex('经济舱', opts);
+      assert.equal(cn.option.cabin, 'K');
+    });
+
+    it('exact fare subclass overrides class matching', () => {
+      const opts = [
+        { brand: '经济舱', cabin: 'K', cabinType: 'Y', price: 500 },
+        { brand: '经济舱', cabin: 'V', cabinType: 'Y', price: 1300 },
+        { brand: '公务舱', cabin: 'R', cabinType: 'J', price: 2260 },
+      ];
+
+      // V → exact match, NOT cheapest economy
+      const v = resolveCabinIndex('V', opts);
+      assert.equal(v.option.cabin, 'V');
+      assert.equal(v.option.price, 1300);
+
+      // K → exact match
+      const k = resolveCabinIndex('K', opts);
+      assert.equal(k.option.cabin, 'K');
+      assert.equal(k.option.price, 500);
+
+      // R → exact match for business subclass
+      const r = resolveCabinIndex('R', opts);
+      assert.equal(r.option.cabin, 'R');
+    });
+
+    it('Y as fare code takes exact match when present', () => {
+      const opts = [
+        { brand: '经济舱', cabin: 'K', cabinType: 'Y', price: 500 },
+        { brand: '经济舱', cabin: 'Y', cabinType: 'Y', price: 2150 },
+      ];
+
+      // Y → exact fare code match (¥2150), NOT cheapest
+      const y = resolveCabinIndex('Y', opts);
+      assert.equal(y.option.cabin, 'Y');
+      assert.equal(y.option.price, 2150);
+
+      // economy → cheapest (K @ ¥500)
+      const eco = resolveCabinIndex('economy', opts);
+      assert.equal(eco.option.cabin, 'K');
+      assert.equal(eco.option.price, 500);
     });
   });
 });
