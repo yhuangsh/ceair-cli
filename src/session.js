@@ -1,8 +1,8 @@
 /**
  * Session Manager
  * Persists login sessions using Playwright browser state.
- * Checks validity via the Nuxt store's isLogin flag (not the checkToken API,
- * which is unreliable).
+ * Checks validity via Nuxt store isLogin (with retry) + checkToken API fallback.
+ * Does NOT delete state on failed load — only on explicit logout.
  */
 
 const fs = require('fs');
@@ -16,7 +16,7 @@ class SessionManager {
 
   /**
    * Load a previously saved session and check validity.
-   * Uses the Nuxt store's isLogin state — more reliable than the checkToken API.
+   * Uses Nuxt store isLogin with hydration retry + checkToken API fallback.
    * @returns {boolean} whether a valid session was restored
    */
   async load() {
@@ -42,13 +42,34 @@ class SessionManager {
         return false;
       }
 
-      // Restore browser with the saved state and check Nuxt store
+      // Restore browser with the saved state and check login validity.
+      // We use TWO checks: (1) wait for Nuxt store hydration, (2) checkToken API.
+      // We do NOT delete state on failure — instead, keep the state file so the
+      // user can retry. Only delete on explicit logout.
       await this.api._ensureNuxtReady();
 
-      const isLogin = await this.api.page.evaluate(() => {
-        const store = window.$nuxt && window.$nuxt.$store;
-        return store && store.state && store.state.user && store.state.user.isLogin === true;
-      });
+      // Wait for Nuxt store to hydrate (isLogin may be false during initial render)
+      let isLogin = false;
+      for (let i = 0; i < 3; i++) {
+        isLogin = await this.api.page.evaluate(() => {
+          const store = window.$nuxt && window.$nuxt.$store;
+          return store && store.state && store.state.user && store.state.user.isLogin === true;
+        });
+        if (isLogin) break;
+        await this.api.page.waitForTimeout(3000);
+      }
+
+      // Also verify via the checkToken API (more reliable than store state)
+      if (!isLogin) {
+        try {
+          const tokenResult = await this.api.checkToken();
+          if (tokenResult.resultCode === 'S200' || tokenResult.resultCode === 'A200') {
+            isLogin = true;
+          }
+        } catch {
+          // API call failed — session may be expired
+        }
+      }
 
       if (isLogin) {
         // Also get user info
@@ -63,10 +84,11 @@ class SessionManager {
         return true;
       }
 
-      // Session expired
+      // Session expired — but DON'T delete the state file.
+      // The user may want to retry, and the file helps diagnose issues.
+      // State is only deleted on explicit logout.
       await this.api.close();
       this.api = new CeairApi();
-      this._deleteState();
       return false;
     } catch {
       this._deleteState();
