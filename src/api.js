@@ -587,83 +587,84 @@ class CeairApi {
     }
 
     // ─── Fill departure date ───────────────────────────────
-    // The form defaults to today; we must set the requested date.
-    // Key: set the date through the Vuex store, not just the DOM input.
+    // The form model stores the date in:
+    //   form.model.datePicker.selectRangeDateValue.goDate
+    //   form.model.datePicker.singleValue
+    // Setting these directly ensures the search uses the correct date.
     const dateSet = await this.page.evaluate((dateStr) => {
-      // Strategy 1: Set date directly in Vuex store
-      const store = window.$nuxt?.$store;
-      if (store) {
-        const search = store.state?.search;
-        if (search) {
-          // Try common state paths
-          if (search.departDate !== undefined) {
-            store.commit('search/setDepartDate', dateStr);
-            return 'vuex-commit';
+      // Strategy 1: Set date via the CeairForm model (most reliable)
+      const forms = document.querySelectorAll('form, .ceair-form');
+      for (const form of forms) {
+        let el = form;
+        for (let i = 0; i < 5; i++) {
+          const vue = el.__vue__;
+          if (vue?.model?.datePicker) {
+            const dp = vue.model.datePicker;
+            // Set all date fields
+            if (dp.selectRangeDateValue) {
+              dp.selectRangeDateValue.goDate = dateStr;
+            }
+            if (dp.singleValue !== undefined) {
+              dp.singleValue = dateStr;
+            }
+            return 'form-model';
           }
-          if (search.form?.departDate !== undefined) {
-            store.commit('search/setFormDepartDate', dateStr);
-            return 'vuex-form';
-          }
-          // Direct mutation as last resort
-          search.departDate = dateStr;
-          if (search.form) search.form.departDate = dateStr;
-          return 'vuex-direct';
+          el = el.parentElement;
+          if (!el) break;
         }
       }
 
-      // Strategy 2: Find the Vue date picker component
-      const allInputs = document.querySelectorAll('input');
-      for (const input of allInputs) {
-        const vue = input.__vue__ || input.closest('[class*="date"]')?.__vue__;
-        if (vue) {
-          // DatePicker components typically watch 'value' prop
-          if (vue.$options?.propsData?.value !== undefined || vue.value !== undefined) {
+      // Strategy 2: Find datePicker component and set its data
+      const inputs = document.querySelectorAll('input.ceair-input__inner');
+      for (const input of inputs) {
+        if (input.classList.contains('ceair-input__inner_homesearch')) continue;
+        if (input.type !== 'text') continue;
+        if (input.getBoundingClientRect().width < 100) continue;
+        let el = input.parentElement;
+        for (let i = 0; i < 10; i++) {
+          const vue = el?.__vue__;
+          if (vue?.$options?.methods?.sendValue) {
+            vue.selectDateValue = dateStr;
+            if (vue.selectRangeDateValue) {
+              vue.selectRangeDateValue.goDate = dateStr;
+            }
             vue.$emit('input', dateStr);
             vue.$emit('change', dateStr);
-            return 'vue-datepicker';
+            if (typeof vue.sendValue === 'function') vue.sendValue(dateStr);
+            return 'datepicker-component';
           }
+          el = el?.parentElement;
+          if (!el) break;
         }
       }
 
-      // Strategy 3: DOM input with native setter + Vue reactivity
-      const candidates = document.querySelectorAll(
-        'input[placeholder*="日期"], input[placeholder*="出发"], ' +
-        '.ceair-date-editor input, .ceair-input__inner_homesearch[type="text"]'
-      );
-      for (const input of candidates) {
-        const rect = input.getBoundingClientRect();
-        if (rect.width < 10) continue;
-        input.removeAttribute('readonly');
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype, 'value'
-        ).set;
-        nativeSetter.call(input, dateStr);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        return 'dom-input';
-      }
-      return false;
+      return 'failed';
     }, depDate);
 
-    // Verify the date was actually set by reading it back
+    // Verify the date was actually set
     await this.page.waitForTimeout(500);
     const dateVerified = await this.page.evaluate(() => {
-      const store = window.$nuxt?.$store;
-      const search = store?.state?.search;
-      return {
-        storeDate: search?.departDate || search?.form?.departDate,
-        inputDate: (() => {
-          const inputs = document.querySelectorAll('input[placeholder*="日期"], .ceair-date-editor input');
-          for (const i of inputs) {
-            if (i.value && i.getBoundingClientRect().width > 10) return i.value;
+      const forms = document.querySelectorAll('form, .ceair-form');
+      for (const form of forms) {
+        let el = form;
+        for (let i = 0; i < 5; i++) {
+          const vue = el.__vue__;
+          if (vue?.model?.datePicker) {
+            const dp = vue.model.datePicker;
+            return {
+              goDate: dp.selectRangeDateValue?.goDate,
+              singleValue: dp.singleValue,
+            };
           }
-          return null;
-        })(),
-      };
+          el = el.parentElement;
+          if (!el) break;
+        }
+      }
+      return null;
     });
 
-    if (dateVerified.storeDate !== depDate && dateVerified.inputDate !== depDate) {
-      console.warn(`Date may not be set correctly: requested=${depDate}, store=${dateVerified.storeDate}, input=${dateVerified.inputDate}, method=${dateSet}`);
+    if (dateVerified && dateVerified.goDate !== depDate && dateVerified.singleValue !== depDate) {
+      console.warn(`Date fill failed: requested=${depDate}, goDate=${dateVerified.goDate}, singleValue=${dateVerified.singleValue}`);
     }
 
     // Listen for S200 on the network
