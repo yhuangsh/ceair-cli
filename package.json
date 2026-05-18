@@ -1,6 +1,6 @@
 {
   "name": "ceair-cli",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "China Eastern Airlines CLI — search, book, and manage flights from the terminal",
   "main": "src/cli.js",
   "bin": {

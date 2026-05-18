@@ -269,7 +269,8 @@ function displayBookingResult(result) {
 
   if (result.resultCode === 'A200' || result.resultCode === 'S200') {
     // Booking API returns fields directly (not nested in data)
-    const orderNo = result.orderNo || result.data?.orderNo || '';
+    // tdOrderNo/tradingNo is the real order number (7690...), orderNo is portal internal (1026...)
+    const orderNo = result.tdOrderNo || result.tradingNo || result.orderNo || result.data?.orderNo || '';
     const pnrNo = result.pnrNo || '';
     const totalPrice = result.totalPrice || result.data?.totalPrice || '';
     const currency = result.currency || 'CNY';
