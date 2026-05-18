@@ -143,7 +143,9 @@ async function sessionStart(opts) {
   }
 
   while (Date.now() - startTime < TIMEOUT_MS) {
-    const pollResult = await page.evaluate(async ({ uuid, ssouserid }) => {
+    let pollResult;
+    try {
+      pollResult = await page.evaluate(async ({ uuid, ssouserid }) => {
       try {
         const resp = await fetch('/mumember/api/sso/login/isconfirmbyscan', {
           method: 'POST',
@@ -161,6 +163,15 @@ async function sessionStart(opts) {
         return { resultCode: 'FETCH_ERROR', resultMsg: e.message };
       }
     }, { uuid, ssouserid });
+    } catch (e) {
+      // page.evaluate can throw if the page navigated during fetch — this often
+      // means login succeeded and the browser was redirected to homepage
+      if (e.message?.includes('navigation') || e.message?.includes('Execution context')) {
+        pollResult = { resultContent: { isLogin: true }, resultCode: 'NAV_REDIRECT' };
+      } else {
+        pollResult = { resultCode: 'FETCH_ERROR', resultMsg: e.message };
+      }
+    }
 
     const elapsed = Math.round((Date.now() - startTime) / 1000);
     const content = pollResult?.resultContent || {};
