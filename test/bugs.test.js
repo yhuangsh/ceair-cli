@@ -422,62 +422,6 @@ describe('Bug #4 — Cancel order retry logic', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// Bug 5: Session residue after logout
-// ═══════════════════════════════════════════════════════════════
-
-describe('Bug #5 — Session cleared on logout', () => {
-
-  it('logout calls localStorage.clear() before API logout', async () => {
-    let localStorageCleared = false;
-    let sessionStorageCleared = false;
-    let logoutCalledAfterClear = false;
-
-    const mockApi = {
-      _ensureBrowser: async () => {},
-      logout: async () => {
-        // If localStorage was cleared before this, the flag should be true
-        logoutCalledAfterClear = localStorageCleared;
-      },
-      close: async () => {},
-      page: {
-        evaluate: async (fn) => {
-          // Simulate what the real evaluate does
-          const fakeWindow = {
-            localStorage: { clear: () => { localStorageCleared = true; } },
-            sessionStorage: { clear: () => { sessionStorageCleared = true; } },
-          };
-          // The actual code does: try { localStorage.clear(); } catch {}
-          // We simulate by executing the function body
-          try { fakeWindow.localStorage.clear(); } catch {}
-          try { fakeWindow.sessionStorage.clear(); } catch {}
-        },
-      },
-    };
-
-    // Replicate the logout logic from session.js
-    const logout = async (api, deleteState) => {
-      try {
-        await api._ensureBrowser();
-        await api.page.evaluate(() => {
-          try { localStorage.clear(); } catch {}
-          try { sessionStorage.clear(); } catch {}
-        });
-        await api.logout();
-      } catch {}
-      await api.close();
-      deleteState();
-    };
-
-    await logout(mockApi, () => {});
-
-    assert.ok(localStorageCleared, 'localStorage.clear() should be called');
-    assert.ok(sessionStorageCleared, 'sessionStorage.clear() should be called');
-    assert.ok(logoutCalledAfterClear,
-      'API logout() should be called AFTER storage is cleared');
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
 // Edge cases
 // ═══════════════════════════════════════════════════════════════
 

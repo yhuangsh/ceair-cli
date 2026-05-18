@@ -1,15 +1,13 @@
 /**
  * CEAir API Client using Playwright
  *
- * Uses a browser to interact with China Eastern Airlines.
- * The SSO login requires Aliyun CAPTCHA verification, so we use
- * a visible browser window for login to let the user solve the CAPTCHA.
+ * Connects to the persistent browser managed by BrowserPool.
+ * No browser launch/close — that's handled by session start/stop.
  */
 
-const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
-const { STATE_FILE, DATA_DIR, ensureDir } = require('./paths');
+const pool = require('./browser-pool');
 
 const BASE_URL = 'https://www.ceair.com';
 const SSO_URL = 'https://sso.ceair.com';
@@ -20,51 +18,38 @@ class CeairApi {
     this.browser = null;
     this.context = null;
     this.page = null;
-    this._ready = false;
-  }
-
-  async _ensureBrowser(headless = true) {
-    if (this._ready && this.context) return;
-
-    this.browser = await chromium.launch({
-      headless,
-      args: [
-        '--disable-blink-features=AutomationControlled',
-        '--disable-features=IsolateOrigins,site-per-process',
-        '--disable-infobars',
-        '--no-first-run',
-        '--no-default-browser-check',
-      ],
-    });
-
-    // Try to restore state
-    let storageState = undefined;
-    if (fs.existsSync(STATE_FILE)) {
-      try {
-        storageState = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-      } catch {
-        // ignore
-      }
-    }
-
-    this.context = await this.browser.newContext({
-      storageState,
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1280, height: 800 },
-      locale: 'zh-CN',
-    });
-
-    this.page = await this.context.newPage();
-
-    this._ready = true;
   }
 
   /**
-   * Make an API request through the browser context (bypasses WAF)
+   * Connect to the persistent browser.
+   * Throws if no session is active.
+   */
+  async connect() {
+    const { browser, context, page } = await pool.connect();
+    this.browser = browser;
+    this.context = context;
+    this.page = page;
+  }
+
+  /**
+   * Disconnect from the browser (keeps it alive).
+   * Call at the end of every CLI command.
+   */
+  disconnect() {
+    if (this.browser) {
+      pool.disconnect(this.browser);
+      this.browser = null;
+      this.context = null;
+      this.page = null;
+    }
+  }
+
+  /**
+   * Make an API request through the browser context (bypasses WAF).
+   * Auto-connects if needed.
    */
   async _apiRequest(url, body = null, method = 'POST') {
-    await this._ensureBrowser();
+    await this.connect();
 
     const response = await this.page.evaluate(
       async ({ url, body, method }) => {
@@ -93,381 +78,7 @@ class CeairApi {
     return response;
   }
 
-  // ─── Session Management ────────────────────────────────────────
-
-  async saveState() {
-    if (!this.context) return;
-    ensureDir();
-    const state = await this.context.storageState();
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), {
-      mode: 0o600,
-    });
-  }
-
-  async close() {
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      this.context = null;
-      this.page = null;
-      this._ready = false;
-    }
-  }
-
   // ─── Authentication ────────────────────────────────────────────
-
-  /**
-   * Interactive SMS login via the SSO page with CAPTCHA support.
-   * Opens a visible browser window for the user to:
-   * 1. Enter their phone number
-   * 2. Solve the Aliyun CAPTCHA
-   * 3. Enter the received SMS code
-   *
-   * Returns the login result.
-   */
-  async interactiveSmsLogin() {
-    // Launch visible browser
-    if (this.browser) {
-      await this.browser.close();
-      this._ready = false;
-    }
-
-    this.browser = await chromium.launch({
-      headless: false,
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
-
-    this.context = await this.browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1000, height: 750 },
-      locale: 'zh-CN',
-    });
-
-    this.page = await this.context.newPage();
-
-    // Navigate to the SMS login page
-    await this.page.goto(`${SSO_URL}/new/login?type=mobile&lang=zh_CNY`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-    await this.page.waitForTimeout(3000);
-
-    // Wait for the login to complete by monitoring the page for cookies
-    // The SSO page sets cookies and redirects on successful login
-    console.log(
-      '\n📱 浏览器窗口已打开。请在浏览器中：'
-    );
-    console.log('   1. 输入手机号码');
-    console.log('   2. 完成验证码验证');
-    console.log('   3. 点击获取验证码');
-    console.log('   4. 输入收到的短信验证码');
-    console.log('   5. 点击立即登录\n');
-
-    // Wait for navigation away from the login page (successful login redirects)
-    try {
-      await this.page.waitForURL(
-        (url) => !url.toString().includes('sso.ceair.com/new/login'),
-        { timeout: 120000 } // 2 minutes
-      );
-    } catch {
-      // Timeout - check if we got the login cookie anyway
-      const cookies = await this.context.cookies();
-      const hasLoginToken = cookies.some(
-        (c) => c.name === 'ceair.login.token'
-      );
-      if (!hasLoginToken) {
-        return {
-          success: false,
-          message: '登录超时，请重试',
-        };
-      }
-    }
-
-    // Login succeeded - check for the login cookie
-    await this.page.waitForTimeout(2000);
-
-    // Navigate to main site to establish session cookies
-    await this.page.goto(`${BASE_URL}/zh/cny/home`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-    await this.page.waitForTimeout(3000);
-
-    // Check for login cookies
-    const cookies = await this.context.cookies();
-    const loginCookie = cookies.find(
-      (c) =>
-        c.name === 'ceair.login.token' ||
-        c.name === 'com.ceair.cesso' ||
-        c.name === 'login_user_info_key'
-    );
-
-    if (loginCookie) {
-      return {
-        success: true,
-        message: '登录成功',
-      };
-    }
-
-    // Also check via the checkToken API
-    try {
-      const checkResult = await this._apiRequest(
-        `${BASE_URL}/portal/v3/member/newCheckToken`,
-        {}
-      );
-      if (checkResult.resultCode === 'A200') {
-        return {
-          success: true,
-          message: '登录成功',
-          user: checkResult.data,
-        };
-      }
-    } catch {
-      // ignore
-    }
-
-    return {
-      success: false,
-      message: '登录似乎未完成，请重试',
-    };
-  }
-
-  /**
-   * QR Code login — no CAPTCHA needed, no visible browser needed.
-   *
-   * Flow:
-   *   1. POST /mumember/api/sso/qrcode/uuid  → get UUID
-   *   2. Display QR code in terminal (content = "uuid=" + UUID)
-   *   3. Poll  /mumember/api/sso/login/isconfirmbyscan
-   *        isScan: true  → user scanned, waiting for confirm
-   *        isLogin: true  → user confirmed, login success
-   *   4. On success, redirect to www.ceair.com to establish session cookies
-   *
-   * @param {function} onScan    called when user scans the QR
-   * @param {function} onWaiting called every poll tick
-   * @returns {{ success: boolean, message: string }}
-   */
-  async qrCodeLogin(onScan, onWaiting) {
-    await this._ensureBrowser(true); // headless is fine for QR login
-
-    // 1. Get UUID
-    const uuidResult = await this.page.evaluate(async () => {
-      const resp = await fetch('/mumember/api/sso/qrcode/uuid', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        credentials: 'include',
-        body: 'salesChannel=7690',
-      });
-      return await resp.json();
-    });
-
-    // If SSO page isn't the current origin, use full URL
-    let uuid;
-    if (uuidResult.resultCode === 'A200') {
-      uuid = uuidResult.resultContent;
-    } else {
-      // Need to navigate to SSO first to get proper cookies
-      await this.page.goto(`${SSO_URL}/new/login?type=ffp&lang=zh_CNY`, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
-      });
-      await this.page.waitForTimeout(2000);
-
-      const retry = await this.page.evaluate(async () => {
-        const resp = await fetch('/mumember/api/sso/qrcode/uuid', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          credentials: 'include',
-          body: 'salesChannel=7690',
-        });
-        return await resp.json();
-      });
-
-      if (retry.resultCode !== 'A200') {
-        return { success: false, message: `获取二维码失败: ${retry.resultMsg}`, uuid: null };
-      }
-      uuid = retry.resultContent;
-    }
-
-    // 2. Poll for scan confirmation
-    const TIMEOUT_MS = 120_000; // 2 min
-    const POLL_INTERVAL_MS = 3000;
-    const startTime = Date.now();
-    let scanned = false;
-
-    while (Date.now() - startTime < TIMEOUT_MS) {
-      if (onWaiting) onWaiting();
-
-      const pollResult = await this.page.evaluate(async (uuid) => {
-        const resp = await fetch('/mumember/api/sso/login/isconfirmbyscan', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({ uuid, salesChannel: '7690' }),
-        });
-        return await resp.json();
-      }, uuid);
-
-      if (pollResult.resultCode !== 'A200') {
-        if (pollResult.resultCode === '-100') {
-          return { success: false, message: '二维码已过期，请重新获取', uuid };
-        }
-        // Transient error, keep polling
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-        continue;
-      }
-
-      const content = pollResult.resultContent || {};
-
-      if (content.isScanExpire) {
-        return { success: false, message: '二维码已过期，请重新获取', uuid };
-      }
-
-      if (content.isLogin) {
-        // Login confirmed in APP — now navigate to main site to pick up cookies
-        // The SSO callback sets cookies on www.ceair.com via redirect
-        await this.page.goto(`${BASE_URL}/zh/cny/home`, {
-          waitUntil: 'domcontentloaded',
-          timeout: 30000,
-        });
-        await this.page.waitForTimeout(3000);
-
-        // Verify login
-        const cookies = await this.context.cookies();
-        const hasToken = cookies.some(
-          (c) =>
-            c.name === 'ceair.login.token' ||
-            c.name === 'com.ceair.cesso' ||
-            c.name === 'login_user_info_key'
-        );
-
-        if (hasToken) {
-          const userData = content;
-          return {
-            success: true,
-            message: '登录成功',
-            uuid,
-            user: userData,
-          };
-        }
-
-        // If no cookie yet, try checking via API
-        try {
-          const check = await this._apiRequest(
-            `${BASE_URL}/portal/v3/member/newCheckToken`,
-            {}
-          );
-          if (check.resultCode === 'A200') {
-            return {
-              success: true,
-              message: '登录成功',
-              uuid,
-              user: check.data || content,
-            };
-          }
-        } catch {
-          // ignore
-        }
-
-        return { success: false, message: '登录Cookie获取失败，请重试', uuid };
-      }
-
-      if (content.isScan && !scanned) {
-        scanned = true;
-        if (onScan) onScan();
-      }
-
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
-    }
-
-    return { success: false, message: '登录超时，请重试', uuid };
-  }
-
-  /**
-   * Interactive password login via the SSO page with CAPTCHA support.
-   */
-  async interactivePasswordLogin() {
-    // Same approach but with FFP login type
-    if (this.browser) {
-      await this.browser.close();
-      this._ready = false;
-    }
-
-    this.browser = await chromium.launch({
-      headless: false,
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
-
-    this.context = await this.browser.newContext({
-      userAgent:
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      viewport: { width: 1000, height: 750 },
-      locale: 'zh-CN',
-    });
-
-    this.page = await this.context.newPage();
-
-    await this.page.goto(`${SSO_URL}/new/login?type=ffp&lang=zh_CNY`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-    await this.page.waitForTimeout(3000);
-
-    console.log(
-      '\n🔑 浏览器窗口已打开。请在浏览器中：'
-    );
-    console.log('   1. 输入登录名 (手机号/证件号/邮箱/12位会员卡号)');
-    console.log('   2. 输入密码');
-    console.log('   3. 完成验证码验证');
-    console.log('   4. 点击立即登录\n');
-
-    try {
-      await this.page.waitForURL(
-        (url) => !url.toString().includes('sso.ceair.com/new/login'),
-        { timeout: 120000 }
-      );
-    } catch {
-      const cookies = await this.context.cookies();
-      const hasLoginToken = cookies.some(
-        (c) => c.name === 'ceair.login.token'
-      );
-      if (!hasLoginToken) {
-        return { success: false, message: '登录超时，请重试' };
-      }
-    }
-
-    await this.page.waitForTimeout(2000);
-    await this.page.goto(`${BASE_URL}/zh/cny/home`, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
-    await this.page.waitForTimeout(3000);
-
-    const cookies = await this.context.cookies();
-    const loginCookie = cookies.find(
-      (c) =>
-        c.name === 'ceair.login.token' ||
-        c.name === 'com.ceair.cesso' ||
-        c.name === 'login_user_info_key'
-    );
-
-    if (loginCookie) {
-      return { success: true, message: '登录成功' };
-    }
-
-    try {
-      const checkResult = await this._apiRequest(
-        `${BASE_URL}/portal/v3/member/newCheckToken`,
-        {}
-      );
-      if (checkResult.resultCode === 'A200') {
-        return { success: true, message: '登录成功', user: checkResult.data };
-      }
-    } catch {}
-
-    return { success: false, message: '登录似乎未完成，请重试' };
-  }
 
   async checkToken() {
     return this._apiRequest(
@@ -476,22 +87,13 @@ class CeairApi {
     );
   }
 
-  async logout() {
-    return this._apiRequest(
-      `${BASE_URL}/portal/v3/member/clear/token`,
-      {}
-    );
-  }
-
-  // ─── Flight Search ─────────────────────────────────────────────
+  // ─── Homepage / Nuxt ──────────────────────────────────────────
 
   /**
    * Ensure the homepage is loaded and Nuxt is ready.
-   * The WAF allows the homepage through, which sets fresh challenge cookies.
-   * We need Nuxt's $http client to make API calls that bypass the WAF.
    */
   async _ensureNuxtReady() {
-    await this._ensureBrowser();
+    await this.connect();
 
     // Check if Nuxt is already loaded and we're on the homepage
     const currentUrl = this.page.url();
@@ -525,9 +127,10 @@ class CeairApi {
     throw new Error('WAF拦截：无法加载东航网站，请稍后重试');
   }
 
+  // ─── Flight Search ─────────────────────────────────────────────
+
   /**
    * Search flights by simulating user interaction on the homepage.
-   * Fills the search form, clicks search, captures the S200 API response.
    */
   async searchFlights(params) {
     const {
@@ -587,10 +190,6 @@ class CeairApi {
     }
 
     // ─── Fill departure date ───────────────────────────────
-    // The form model stores the date in:
-    //   form.model.datePicker.selectRangeDateValue.goDate
-    //   form.model.datePicker.singleValue
-    // Setting these directly ensures the search uses the correct date.
     const dateSet = await this.page.evaluate((dateStr) => {
       // Strategy 1: Set date via the CeairForm model (most reliable)
       const forms = document.querySelectorAll('form, .ceair-form');
@@ -600,7 +199,6 @@ class CeairApi {
           const vue = el.__vue__;
           if (vue?.model?.datePicker) {
             const dp = vue.model.datePicker;
-            // Set all date fields
             if (dp.selectRangeDateValue) {
               dp.selectRangeDateValue.goDate = dateStr;
             }
@@ -683,8 +281,6 @@ class CeairApi {
             this.page.off('response', handler);
             networkResolve(json);
           } else {
-            // Return non-S200 responses too (e.g. 231002 = no flights, 232007 = error)
-            // The caller can handle these appropriately
             captured = true;
             this.page.off('response', handler);
             networkResolve(json);
@@ -703,35 +299,15 @@ class CeairApi {
     }
     await searchBtn.click({ force: true });
 
-    // Wait for either:
-    //   (A) S200 response captured via network listener
-    //   (B) Page navigated to /shopping/ — then wait for S200 on the new page
-    //   (C) Timeout
-    //
-    // Key fix: the S200 response may arrive DURING navigation (before or after).
-    // The page.on('response') handler survives navigation in Playwright,
-    // so networkPromise should resolve regardless.
-    //
-    // But sometimes the response arrives and is captured by the browser's
-    // internal fetch, not as a network event visible to Playwright.
-    // In that case, after navigation, we check the Vuex store directly.
     const result = await Promise.race([
-      // (A) S200 from network listener (works for same-page AJAX)
       networkPromise,
 
-      // (B) Page navigated to /shopping/ — S200 may have already arrived
-      //     during navigation. Check Vuex store for cached results.
       (async () => {
         try {
           await this.page.waitForURL('**/shopping/**', { timeout: 15000 });
-          // Navigation happened. The S200 may have been captured already
-          // by the network handler (networkPromise will resolve soon),
-          // OR it may be in the Vuex store.
           const navResult = await Promise.race([
             networkPromise,
-            // Check Vuex store for cached flight data
             (async () => {
-              // Wait a moment for Nuxt to hydrate on the new page
               await this.page.waitForTimeout(5000);
               const storeData = await this.page.evaluate(() => {
                 const store = window.$nuxt?.$store;
@@ -753,7 +329,6 @@ class CeairApi {
                 return { _debug: { hasNuxt, hasStore, hasFlight, flightKeys, itemsCount } };
               });
               if (storeData?.resultCode === 'S200') return storeData;
-              // Still nothing — wait more for network
               return networkPromise;
             })(),
             new Promise((r) => setTimeout(() => r(null), 15000)),
@@ -763,7 +338,6 @@ class CeairApi {
         } catch { return null; }
       })(),
 
-      // (C) Timeout
       new Promise((r) => setTimeout(() => {
         try { this.page?.off('response', handler); } catch {}
         r(null);
@@ -780,21 +354,6 @@ class CeairApi {
 
   /**
    * Click-based booking flow: navigates the real website like a human user.
-   *
-   * Steps:
-   *   1. searchFlights (click-based) → captures S200 response with flightItems
-   *   2. Click cabin price on the chosen flight
-   *   3. Click "选购" button that appears
-   *   4. On booking-new page: select passenger, fill contact, submit
-   *   5. Capture the booking API response
-   *
-   * @param {Object} params
-   * @param {Object} params.searchResult  - The S200 search response
-   * @param {number} params.flightIndex   - Index into flightItems[]
-   * @param {number} params.cabinIndex   - Index into cabinInfoDescs[] for the chosen flight
-   * @param {Object} params.passenger    - { name, idType, idNo, gender, birthday, phone, email, nationality }
-   * @param {Object} params.contact      - { name, phone }
-   * @returns {Object} booking API response
    */
   async createBooking(params) {
     const {
@@ -808,11 +367,8 @@ class CeairApi {
     const page = this.page;
 
     // We should already be on the shopping page after searchFlights
-    // Step 1: Dismiss modals, click the cabin price for the chosen flight
     await this._dismissModals();
 
-    // Find all cabin price elements (cabin-level-item cabin-select pointer)
-    // Each flight card has cabinInfoDescs.length price elements
     const flightItems = searchResult?.data?.flightItems || [];
     if (flightItemIndex >= flightItems.length) {
       throw new Error(`航班序号 ${flightItemIndex} 超出范围`);
@@ -832,22 +388,17 @@ class CeairApi {
     }
     targetCabinOffset += cabinIndex;
 
-    // ─── Verify we're on the right search results page ───
-    // The shopping page URL contains the date (e.g. /shopping/SHA-BJS-2026-05-24)
-    // Flight numbers on the page may have spaces ("MU 5127") so text scanning is unreliable.
+    // Verify we're on the right search results page
     const currentUrl = page.url();
     const expectedDate = expectedSeg?.fltDate || '';
     const urlHasCorrectDate = currentUrl.includes(expectedDate) ||
-      // If we navigated, the date should be in the searchFlightQuery
       await page.evaluate((d) => {
         const sq = window.$nuxt?.$store?.state?.flight?.searchFlightQuery;
         return sq?.date === d;
       }, expectedDate);
 
-    // Also check if the expected flight number appears (with or without space)
     const domVerified = await page.evaluate((expectedFlightNo) => {
       const allText = document.body.innerText;
-      // Try both "MU5127" and "MU 5127" formats
       const noSpace = allText.includes(expectedFlightNo);
       const withSpace = allText.includes(
         expectedFlightNo.replace(/^([A-Z]+)(\d+)$/, '$1 $2')
@@ -862,7 +413,7 @@ class CeairApi {
       );
     }
 
-    // Scroll the target flight into view (approximate)
+    // Scroll the target flight into view
     await page.evaluate((idx) => {
       const btns = document.querySelectorAll('.cabin-select.pointer');
       if (btns[idx]) btns[idx].scrollIntoView({ block: 'center' });
@@ -882,12 +433,10 @@ class CeairApi {
     ).catch(() => {});
     await page.waitForTimeout(2000);
 
-    // Step 2: Click "选购" button that appeared after the price click
+    // Click "选购" button
     const selectBtn = page.locator('.fare-btn-txt').first();
     const selectVisible = await selectBtn.isVisible().catch(() => false);
     if (!selectVisible) {
-      // Maybe the price click selected a different cabin; try again
-      // Dismiss modals first
       await this._dismissModals();
       await priceButtons[targetCabinOffset].click({ force: true });
       await page.waitForResponse(
@@ -897,8 +446,7 @@ class CeairApi {
       await page.waitForTimeout(2000);
     }
 
-    // Step 2: Navigate to booking-new via onClickConfirm (not regular click)
-    // Regular Playwright click doesn't trigger the Vue event chain
+    // Navigate to booking-new via onClickConfirm
     await page.evaluate(() => {
       const btn = document.querySelector('.fare-btn-txt');
       if (btn && btn.__vue__) {
@@ -908,24 +456,20 @@ class CeairApi {
     await page.waitForTimeout(4000);
     await this._dismissModals();
 
-    // Step 3: Select passenger from saved list
-    // Wait for passenger list to load (may be async)
+    // Step 3: Select passenger
     await page.waitForTimeout(2000);
 
-    // Try multiple selectors — the booking page may use different class names
     let savedPaxBtns = await page.locator('.booking-passenger').all();
     if (savedPaxBtns.length === 0) {
-      // Try alternative selectors
       savedPaxBtns = await page.locator('[class*="passenger"][class*="card"], [class*="passenger"][class*="item"], [class*="pax-"]').all();
     }
     if (savedPaxBtns.length === 0) {
-      // Last resort: any clickable element containing the passenger name
       const nameElements = await page.locator(`text=${passenger.name}`).all();
       for (const el of nameElements) {
         const box = await el.boundingBox();
         if (box && box.width > 50) {
           await el.click({ force: true });
-          savedPaxBtns = [el]; // treat as found
+          savedPaxBtns = [el];
           break;
         }
       }
@@ -941,7 +485,6 @@ class CeairApi {
       }
     }
 
-    // If still not selected by name, try clicking the first passenger
     if (!paxSelected && savedPaxBtns.length > 0) {
       await savedPaxBtns[0].click({ force: true });
       paxSelected = true;
@@ -951,7 +494,7 @@ class CeairApi {
     }
     await page.waitForTimeout(800);
 
-    // Step 4: Click 下一步 (passenger step)
+    // Step 4: Click 下一步
     await page.evaluate(() => {
       Array.from(document.querySelectorAll('button')).find(b =>
         b.textContent?.trim() === '下一步' && !b.disabled && b.getBoundingClientRect().width > 0
@@ -959,7 +502,7 @@ class CeairApi {
     });
     await page.waitForTimeout(2000);
 
-    // Step 5: Handle lithium battery safety notice modal
+    // Step 5: Handle lithium battery safety modal
     await page.evaluate(() => {
       document.querySelectorAll('[class*="modal"]').forEach(modal => {
         if (modal.getBoundingClientRect().width < 100 || !modal.textContent?.includes('锂电池')) return;
@@ -973,7 +516,7 @@ class CeairApi {
     });
     await page.waitForTimeout(1000);
 
-    // Step 6: Click second 下一步 → navigates to addServices
+    // Step 6: Click second 下一步 → addServices
     await page.evaluate(() => {
       const btns = Array.from(document.querySelectorAll('button'))
         .filter(b => b.textContent?.trim() === '下一步' && !b.disabled && b.getBoundingClientRect().width > 0);
@@ -987,7 +530,6 @@ class CeairApi {
       throw new Error('未能进入增值服务页面，请重试');
     }
 
-    // Set contact info AND passenger selection in Vuex state
     await page.evaluate((paxInfo) => {
       const store = window.$nuxt.$store;
       const flight = store.state.flight;
@@ -1001,9 +543,6 @@ class CeairApi {
         contactMobile: paxInfo.phone,
         contactMobCountry: '86',
       };
-      // Also set selectPassengers — the submit() function reads .name from this
-      // For MU flights, the UI passenger click sets this with full data, but for
-      // codeshares it may only have {name}. Reconstruct from passengerParam.
       const existingPax = flight.selectPassengers;
       const paxParam = flight.passengerParam?.paxs?.[0];
       if (!existingPax || !existingPax[0]?.certNo) {
@@ -1036,7 +575,6 @@ class CeairApi {
     };
     page.on('response', responseHandler);
 
-    // Verify we're on the addServices page
     const addServicesRoute = await page.evaluate(() => window.$nuxt?.$route?.name);
     if (addServicesRoute !== 'addServices') {
       throw new Error('未能进入增值服务页面，请重试');
@@ -1055,7 +593,6 @@ class CeairApi {
       }
     });
 
-    // Wait for booking API response
     await page.waitForTimeout(8000);
     page.off('response', responseHandler);
 
@@ -1073,14 +610,8 @@ class CeairApi {
     });
   }
 
-  async getPayUrl(orderNo) {
-    return this._apiRequest(`${BASE_URL}/portal/ordertype/getPayUrl`, {
-      orderNo,
-    });
-  }
-
   async queryOrderList(params = {}) {
-    await this._ensureBrowser();
+    await this.connect();
     return this.page.evaluate(async (p) => {
       const http = window.$nuxt?.$http;
       if (!http?.order?.getAllOrderList) {
@@ -1090,11 +621,8 @@ class CeairApi {
     }, params);
   }
 
-  /**
-   * Get full order detail (passengers, segments, seats, etc.)
-   */
   async getOrderDetail(tradeOrderNo) {
-    await this._ensureBrowser();
+    await this.connect();
     return this.page.evaluate(async (tradeOrderNo) => {
       const http = window.$nuxt?.$http;
       if (!http?.order?.getTicketDetail301) {
@@ -1104,12 +632,8 @@ class CeairApi {
     }, tradeOrderNo);
   }
 
-  /**
-   * Cancel an unpaid order
-   * Retries with fresh Nuxt loading if the first attempt fails.
-   */
   async cancelOrder(tradeOrderNo) {
-    await this._ensureBrowser();
+    await this.connect();
 
     const attemptCancel = async () => {
       return this.page.evaluate(async (tradeOrderNo) => {
@@ -1121,10 +645,8 @@ class CeairApi {
       }, tradeOrderNo);
     };
 
-    // First attempt
     let result = await attemptCancel();
 
-    // If failed (no Nuxt or WAF blocked), reload and retry
     if (result.resultCode === 'ERROR' || result.resultCode === 'FETCH_ERROR') {
       await this._ensureNuxtReady();
       result = await attemptCancel();

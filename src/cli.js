@@ -1,21 +1,294 @@
 #!/usr/bin/env node
 /**
  * CEAir Booking CLI
- * Search, login, and book flights on China Eastern Airlines from the command line.
+ * Search, book, and manage flights on China Eastern Airlines from the terminal.
  *
- * Uses Playwright browser to bypass WAF/bot protection.
- * Login opens a visible browser window for CAPTCHA verification.
+ * Session model:
+ *   ceair-cli session start   →  launch browser + QR login
+ *   ceair-cli search/book/…   →  reuse running browser
+ *   ceair-cli session stop    →  kill browser
  */
 
 const { Command } = require('commander');
 const inquirer = require('inquirer');
 const chalk = require('chalk');
 const ora = require('ora');
-const SessionManager = require('../src/session');
+const qrcode = require('qrcode-terminal');
+const CeairApi = require('../src/api');
+const pool = require('../src/browser-pool');
 const { resolveCity, getCityName, listCities } = require('../src/cities');
 const { displayFlights, displayBookingResult, displayUpcomingTrips, formatDate } = require('../src/display');
 
 const program = new Command();
+
+// ─── Helper: get connected API, or error if no session ──────────
+
+function requireApi() {
+  const api = new CeairApi();
+  return api;
+}
+
+// ─── Session Handlers ───────────────────────────────────────────
+
+async function sessionStart(opts) {
+  try {
+    const { running } = await pool.status();
+    if (running) {
+      console.log(chalk.yellow('Session already active. Run `ceair-cli session stop` first to restart.'));
+      return;
+    }
+  } catch {
+    // ignore
+  }
+
+  const spinner = ora('启动浏览器...').start();
+
+  let wsEndpoint;
+  try {
+    ({ wsEndpoint } = await pool.launch());
+  } catch (err) {
+    spinner.fail(err.message);
+    return;
+  }
+  spinner.succeed('浏览器已启动');
+
+  // Connect for login
+  const browser = await require('playwright').chromium.connectOverCDP(wsEndpoint);
+  const context = browser.contexts()[0];
+  const page = context.pages()[0];
+
+  // Navigate to SSO login page
+  const uuidSpinner = ora('正在获取二维码...').start();
+  await page.goto(
+    'https://sso.ceair.com/new/login?type=ffp&lang=zh_CNY',
+    { waitUntil: 'domcontentloaded', timeout: 30000 }
+  );
+  await page.waitForTimeout(5000);
+
+  const { uuid } = await page.evaluate(() => {
+    const app = document.querySelector('#app').__vue__;
+    function findComponent(comp, depth = 0) {
+      if (depth > 10) return null;
+      if (comp.$options?.methods?.getUUID) return comp;
+      for (const child of comp.$children || []) {
+        const found = findComponent(child, depth + 1);
+        if (found) return found;
+      }
+      return null;
+    }
+    const login = findComponent(app);
+    return { uuid: login.uuid };
+  });
+
+  if (!uuid) {
+    uuidSpinner.fail('获取二维码失败');
+    await pool.kill();
+    return;
+  }
+  uuidSpinner.stop();
+
+  const qrContent = `uuid=${uuid}`;
+  console.log(chalk.bold('\n请使用 东方航空APP 扫描以下二维码登录：\n'));
+  qrcode.generate(qrContent, { small: true });
+  console.log(chalk.gray(`\n二维码内容: ${qrContent}`));
+  console.log(chalk.gray('有效期 2 分钟，过期请重新执行 ceair-cli session start\n'));
+
+  const pollSpinner = ora('等待扫码... (0s / 120s)').start();
+  const startTime = Date.now();
+  const TIMEOUT_MS = 120_000;
+  const POLL_MS = 3000;
+  let scanned = false;
+  let loginDone = false;
+
+  let ssouserid = null;
+  const captureHandler = (req) => {
+    if (req.url().includes('isconfirmbyscan') && !ssouserid) {
+      ssouserid = req.headers()['ssouserid'];
+    }
+  };
+  page.on('request', captureHandler);
+
+  for (let wait = 0; wait < 10 && !ssouserid; wait++) {
+    await page.waitForTimeout(1000);
+  }
+
+  if (ssouserid) {
+    page.off('request', captureHandler);
+    await page.evaluate(() => {
+      const app = document.querySelector('#app').__vue__;
+      function findComponent(comp, depth = 0) {
+        if (depth > 10) return null;
+        if (comp.$options?.methods?.getUUID) return comp;
+        for (const child of comp.$children || []) {
+          const found = findComponent(child, depth + 1);
+          if (found) return found;
+        }
+        return null;
+      }
+      const login = findComponent(app);
+      if (login) {
+        clearInterval(login.scanrecur);
+        clearTimeout(login.scanrecur);
+      }
+    });
+  }
+
+  while (Date.now() - startTime < TIMEOUT_MS) {
+    const pollResult = await page.evaluate(async ({ uuid, ssouserid }) => {
+      try {
+        const resp = await fetch('/mumember/api/sso/login/isconfirmbyscan', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'ssouserid': ssouserid || '',
+            'currencycode': 'CNY',
+            'languagecode': 'zh',
+          },
+          credentials: 'include',
+          body: JSON.stringify({ uuid, salesChannel: '7690' }),
+        });
+        return await resp.json();
+      } catch (e) {
+        return { resultCode: 'FETCH_ERROR', resultMsg: e.message };
+      }
+    }, { uuid, ssouserid });
+
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    const content = pollResult?.resultContent || {};
+
+    if (content.isScanExpire || pollResult?.resultCode === '-100') {
+      pollSpinner.fail('二维码已过期，请重新执行 ceair-cli session start');
+      break;
+    }
+
+    if (content.isLogin) {
+      loginDone = true;
+      pollSpinner.text = '正在建立会话...';
+
+      let navOk = false;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          await page.goto('https://www.ceair.com/zh/cny/home', {
+            waitUntil: 'domcontentloaded',
+            timeout: 30000,
+          });
+          await page.waitForTimeout(4000);
+          const hasNuxt = await page.evaluate(() => !!window.$nuxt);
+          if (hasNuxt) { navOk = true; break; }
+        } catch {}
+        await page.waitForTimeout(2000);
+      }
+
+      pollSpinner.succeed(chalk.green('✓ 扫码登录成功！'));
+      if (!navOk) {
+        console.log(chalk.yellow('  ⚠ 主页加载被WAF拦截，会话可能不稳定。'));
+      }
+
+      let userName = null;
+      let userCard = null;
+      try {
+        const api = new CeairApi();
+        api.browser = browser;
+        api.context = context;
+        api.page = page;
+        const check = await api._apiRequest(
+          'https://www.ceair.com/portal/v3/member/newCheckToken', {}
+        );
+        if (check.data) {
+          userName = check.data.name || check.data.userName || check.data.memberName;
+          userCard = check.data.ffpCardNo;
+        }
+      } catch {}
+
+      if (userName) console.log(chalk.white(`  用户: ${userName}`));
+      if (userCard) console.log(chalk.white(`  会员卡号: ${userCard}`));
+
+      pool.setUser({ name: userName, cardNo: userCard });
+
+      console.log(chalk.gray('\n浏览器会话已启动。使用以下命令操作：'));
+      console.log(chalk.cyan('  ceair-cli search SHA BJS 2026-06-15'));
+      console.log(chalk.cyan('  ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y'));
+      console.log(chalk.cyan('  ceair-cli orders'));
+      console.log(chalk.gray('\n完成后执行 ceair-cli session stop 关闭浏览器。'));
+
+      // Disconnect without killing the browser.
+      // browser.close() sends Browser.close via CDP which kills Chromium.
+      // Instead, remove listeners and exit the Node process.
+      // With proc.unref(), the child Chromium process survives.
+      browser._connection.removeAllListeners();
+      process.exit(0);
+    }
+
+    if (content.isScan && !scanned) {
+      scanned = true;
+      pollSpinner.text = chalk.cyan('✋ 已扫描！请在手机上点击「确认登录」...');
+    } else if (!scanned) {
+      pollSpinner.text = `等待扫码... (${elapsed}s / 120s)`;
+    }
+
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
+
+  if (!loginDone && !scanned) {
+    pollSpinner.fail('登录超时，请重新执行 ceair-cli session start');
+    await pool.kill();
+    return;
+  }
+
+  // Login timed out or QR expired — kill browser
+  if (!loginDone) {
+    await pool.kill();
+  }
+  process.exit(loginDone ? 0 : 1);
+}
+
+async function sessionStop() {
+  const { running } = await pool.status();
+  if (!running) {
+    console.log(chalk.yellow('No active session.'));
+    return;
+  }
+  const spinner = ora('正在关闭浏览器...').start();
+  await pool.kill();
+  spinner.succeed(chalk.green('✓ 浏览器会话已关闭'));
+}
+
+async function sessionStatus() {
+  const { running, info } = await pool.status();
+  if (!running) {
+    console.log(chalk.yellow('No active session.'));
+    console.log(chalk.gray('Run `ceair-cli session start` to start one.'));
+    return;
+  }
+  console.log(chalk.green('✓ Session active'));
+  if (info?.startedAt) console.log(chalk.white(`  Started: ${info.startedAt}`));
+  if (info?.pid) console.log(chalk.white(`  PID: ${info.pid}`));
+  if (info?.user?.name) console.log(chalk.white(`  User: ${info.user.name}`));
+  if (info?.user?.cardNo) console.log(chalk.white(`  Card: ${info.user.cardNo}`));
+  console.log(chalk.white(`  Endpoint: ${info.wsEndpoint}`));
+}
+
+// ─── Session Command ────────────────────────────────────────────
+
+program
+  .command('session <action>')
+  .description('Manage browser session\n\n' +
+    '  start    Launch browser and login via QR code\n' +
+    '  stop     Kill the browser session\n' +
+    '  status   Show session info')
+  .addHelpText('after', '\nExamples:\n  $ ceair-cli session start\n  $ ceair-cli session status\n  $ ceair-cli session stop')
+  .action(async (action, opts) => {
+    if (action === 'start') {
+      await sessionStart(opts);
+    } else if (action === 'stop') {
+      await sessionStop();
+    } else if (action === 'status') {
+      await sessionStatus();
+    } else {
+      console.log(chalk.yellow(`Unknown action: ${action}`));
+      console.log(chalk.gray('Use: start, stop, status'));
+    }
+  });
 
 // ─── Search Command ──────────────────────────────────────────────
 
@@ -26,7 +299,7 @@ program
   .option('-a, --adults <num>', 'Number of adults', '1')
   .option('-c, --children <num>', 'Number of children', '0')
   .option('--cabin <class>', 'Cabin class: Y(经济) C(商务) F(头等)', 'Y')
-  .addHelpText('after', `\nExamples:\n  $ ceair-cli search SHA BJS 2025-06-15\n  $ ceair-cli search 上海 北京 2025-06-15 --cabin C\n  $ ceair-cli search SHA BJS 2025-06-15 -r 2025-06-20\n\nUse \"ceair-cli cities\" to see all supported city codes.`)
+  .addHelpText('after', `\nExamples:\n  $ ceair-cli search SHA BJS 2025-06-15\n  $ ceair-cli search 上海 北京 2025-06-15 --cabin C\n  $ ceair-cli search SHA BJS 2025-06-15 -r 2025-06-20\n\nUse "ceair-cli cities" to see all supported city codes.`)
   .action(async (from, to, date, opts) => {
     const depCity = resolveCity(from);
     const arrCity = resolveCity(to);
@@ -47,11 +320,11 @@ program
       return;
     }
 
-    const session = new SessionManager();
+    const api = requireApi();
     const spinner = ora('正在搜索航班...').start();
 
     try {
-      const result = await session.api.searchFlights({
+      const result = await api.searchFlights({
         depCity,
         arrCity,
         depDate: date,
@@ -78,275 +351,7 @@ program
       spinner.fail('搜索失败');
       console.error(chalk.red(err.message));
     } finally {
-      await session.cleanup();
-    }
-  });
-
-// ─── Login Command ───────────────────────────────────────────────
-
-program
-  .command('login')
-  .description('Login to China Eastern Airlines via QR code, SMS, or password\n\n' +
-    '  qrcode   Scan QR in terminal (recommended, headless)\n' +
-    '  sms      Phone verification (opens browser for CAPTCHA)\n' +
-    '  password Account + password (opens browser for CAPTCHA)\n\n' +
-    '  Session saved to ~/.config/ceair-cli/browser-state.json')
-  .option('-m, --method <type>', 'Login method: qrcode, sms, or password')
-  .addHelpText('after', '\nExamples:\n  $ ceair-cli login --method qrcode\n  $ ceair-cli login -m sms')
-  .action(async (opts) => {
-    const session = new SessionManager();
-
-    // Check existing session
-    try {
-      const restored = await session.load();
-      if (restored) {
-        console.log(chalk.green('✓ 已有有效登录会话，无需重新登录。'));
-        console.log(chalk.gray('  如需切换账号，请先执行 ceair logout'));
-        await session.cleanup();
-        return;
-      }
-    } catch {
-      // Session check failed, proceed with login
-    }
-
-    let loginMethod = opts.method;
-    if (!loginMethod || !['sms', 'password', 'qrcode'].includes(loginMethod)) {
-      const answer = await inquirer.prompt([
-        {
-          type: 'list',
-          name: 'loginMethod',
-          message: '选择登录方式:',
-          choices: [
-            { name: '📱 二维码扫码登录 (推荐 — 无需验证码)', value: 'qrcode' },
-            { name: '📲 手机验证码登录', value: 'sms' },
-            { name: '🔑 账号密码登录 (会员卡号/手机号/邮箱)', value: 'password' },
-          ],
-        },
-      ]);
-      loginMethod = answer.loginMethod;
-    }
-
-    try {
-      let result;
-
-      if (loginMethod === 'qrcode') {
-        // ─── QR Code Login ─────────────────────────────
-        const qrcode = require('qrcode-terminal');
-
-        // Step 1: Get UUID from SSO (via the SSO page's Vue component)
-        const uuidSpinner = ora('正在获取二维码...').start();
-        await session.api._ensureBrowser(true);
-
-        // Navigate to SSO login page and use the component's API wrapper
-        await session.api.page.goto(
-          'https://sso.ceair.com/new/login?type=ffp&lang=zh_CNY',
-          { waitUntil: 'domcontentloaded', timeout: 30000 }
-        );
-        await session.api.page.waitForTimeout(5000);
-
-        // Get UUID and ssouserid from the running component
-        const { uuid } = await session.api.page.evaluate(() => {
-          const app = document.querySelector('#app').__vue__;
-          function findComponent(comp, depth = 0) {
-            if (depth > 10) return null;
-            if (comp.$options?.methods?.getUUID) return comp;
-            for (const child of comp.$children || []) {
-              const found = findComponent(child, depth + 1);
-              if (found) return found;
-            }
-            return null;
-          }
-          const login = findComponent(app);
-          return { uuid: login.uuid };
-        });
-
-        if (!uuid) {
-          uuidSpinner.fail('获取二维码失败');
-          await session.cleanup();
-          return;
-        }
-        uuidSpinner.stop();
-
-        // Step 2: Display QR code in terminal
-        const qrContent = `uuid=${uuid}`;
-        console.log(chalk.bold('\n请使用 东方航空APP 扫描以下二维码登录：\n'));
-        qrcode.generate(qrContent, { small: true });
-        console.log(chalk.gray(`\n二维码内容: ${qrContent}`));
-        console.log(chalk.gray('有效期 2 分钟，过期请重新执行 ceair-cli login\n'));
-
-        // Step 3: Capture ssouserid header from the component's polling,
-        //         then do our own polling with raw fetch.
-        const pollSpinner = ora('等待扫码... (0s / 120s)').start();
-        const startTime = Date.now();
-        const TIMEOUT_MS = 120_000;
-        const POLL_MS = 3000;
-        let scanned = false;
-        let loginDone = false;
-
-        // Capture ssouserid from the component's own polling requests
-        // The component starts polling isconfirmbyscan after UUID is generated
-        // We try to capture ssouserid from those requests, but if not available
-        // we fall back to the component's own polling
-        let ssouserid = null;
-        const captureHandler = async (req) => {
-          if (req.url().includes('isconfirmbyscan') && !ssouserid) {
-            ssouserid = req.headers()['ssouserid'];
-          }
-        };
-        session.api.page.on('request', captureHandler);
-
-        // Wait up to 10s for the component to fire a poll and capture ssouserid
-        for (let wait = 0; wait < 10 && !ssouserid; wait++) {
-          await session.api.page.waitForTimeout(1000);
-        }
-
-        if (ssouserid) {
-          // Got ssouserid — stop component timer and do our own polling
-          session.api.page.off('request', captureHandler);
-          await session.api.page.evaluate(() => {
-            const app = document.querySelector('#app').__vue__;
-            function findComponent(comp, depth = 0) {
-              if (depth > 10) return null;
-              if (comp.$options?.methods?.getUUID) return comp;
-              for (const child of comp.$children || []) {
-                const found = findComponent(child, depth + 1);
-                if (found) return found;
-              }
-              return null;
-            }
-            const login = findComponent(app);
-            if (login) {
-              clearInterval(login.scanrecur);
-              clearTimeout(login.scanrecur);
-            }
-          });
-        } else {
-          // No ssouserid — let the component poll itself and watch for cookies
-          pollSpinner.text = '等待扫码... (组件轮询模式)';
-        }
-
-        // Our own polling loop with the captured ssouserid
-        while (Date.now() - startTime < TIMEOUT_MS) {
-          const pollResult = await session.api.page.evaluate(async ({ uuid, ssouserid }) => {
-            try {
-              const resp = await fetch('/mumember/api/sso/login/isconfirmbyscan', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'ssouserid': ssouserid || '',
-                  'currencycode': 'CNY',
-                  'languagecode': 'zh',
-                },
-                credentials: 'include',
-                body: JSON.stringify({ uuid, salesChannel: '7690' }),
-              });
-              return await resp.json();
-            } catch (e) {
-              return { resultCode: 'FETCH_ERROR', resultMsg: e.message };
-            }
-          }, { uuid, ssouserid });
-
-          const elapsed = Math.round((Date.now() - startTime) / 1000);
-          const content = pollResult?.resultContent || {};
-
-          if (content.isScanExpire || pollResult?.resultCode === '-100') {
-            pollSpinner.fail('二维码已过期，请重新执行 ceair-cli login');
-            break;
-          }
-
-          if (content.isLogin) {
-            loginDone = true;
-            pollSpinner.text = '正在建立会话...';
-
-            // Navigate to main site to establish session cookies (with retries)
-            let navOk = false;
-            for (let attempt = 0; attempt < 3; attempt++) {
-              try {
-                await session.api.page.goto('https://www.ceair.com/zh/cny/home', {
-                  waitUntil: 'domcontentloaded',
-                  timeout: 30000,
-                });
-                await session.api.page.waitForTimeout(4000);
-                // Check if Nuxt loaded (WAF didn't block)
-                const hasNuxt = await session.api.page.evaluate(() => !!window.$nuxt);
-                if (hasNuxt) { navOk = true; break; }
-              } catch {}
-              await session.api.page.waitForTimeout(2000);
-            }
-
-            await session.save();
-            pollSpinner.succeed(chalk.green('✓ 扫码登录成功！'));
-            if (!navOk) {
-              console.log(chalk.yellow('  ⚠ 主页加载被WAF拦截，会话可能不稳定。如遇问题请重新登录。'));
-            }
-
-            try {
-              const check = await session.api.checkToken();
-              if (check.data) {
-                const name =
-                  check.data.name || check.data.userName || check.data.memberName;
-                if (name) console.log(chalk.white(`  用户: ${name}`));
-                if (check.data.ffpCardNo)
-                  console.log(chalk.white(`  会员卡号: ${check.data.ffpCardNo}`));
-              }
-            } catch {}
-            break;
-          }
-
-          if (content.isScan && !scanned) {
-            scanned = true;
-            pollSpinner.text = chalk.cyan('✋ 已扫描！请在手机上点击「确认登录」...');
-          } else if (!scanned) {
-            pollSpinner.text = `等待扫码... (${elapsed}s / 120s)`;
-          }
-
-          await new Promise((r) => setTimeout(r, POLL_MS));
-        }
-
-        if (!loginDone && !scanned) {
-          pollSpinner.fail('登录超时，请重新执行 ceair-cli login');
-        }
-
-        await session.cleanup();
-        return;
-      }
-
-      // ─── SMS / Password Login ──────────────────────
-      if (loginMethod === 'sms') {
-        result = await session.api.interactiveSmsLogin();
-      } else {
-        result = await session.api.interactivePasswordLogin();
-      }
-
-      if (result.success) {
-        await session.save();
-        console.log(chalk.green(`\n✓ ${result.message}`));
-
-        // Try to get user info
-        try {
-          const check = await session.api.checkToken();
-          if (check.data) {
-            const name =
-              check.data.name || check.data.userName || check.data.memberName;
-            if (name) {
-              console.log(chalk.white(`  用户: ${name}`));
-            }
-            if (check.data.ffpCardNo) {
-              console.log(
-                chalk.white(`  会员卡号: ${check.data.ffpCardNo}`)
-              );
-            }
-          }
-        } catch {
-          // ignore
-        }
-      } else {
-        console.log(chalk.yellow(`\n${result.message}`));
-      }
-    } catch (err) {
-      console.error(chalk.red('登录出错:'), err.message);
-    } finally {
-      await session.cleanup();
+      api.disconnect();
     }
   });
 
@@ -375,20 +380,7 @@ program
   .addHelpText('after', `\nExamples:\n  # Fully interactive:\n  $ ceair-cli book\n\n  # With route, pick flight interactively:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15\n\n  # Match by flight number (zero prompts for flight):\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n\n  # Fully specified:\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 \\\n      -p 张三 --passenger-id 110101199001011234 --passenger-phone 13800138000 -y\n\n  # With config defaults for passenger:\n  $ ceair-cli config set passenger.name 张三\n  $ ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y`)
   .action(async (opts) => {
     const { loadConfig } = require('./config');
-    const session = new SessionManager();
-    let restored = false;
-
-    try {
-      restored = await session.load();
-    } catch {
-      // not logged in
-    }
-
-    if (!restored) {
-      console.log(chalk.yellow('请先登录: ceair-cli login'));
-      await session.cleanup();
-      return;
-    }
+    const api = requireApi();
 
     try {
       // Load config for defaults
@@ -417,12 +409,12 @@ program
       const arrCity = resolveCity(fields.to);
       if (!depCity || !arrCity) {
         console.log(chalk.red('无法识别城市代码'));
-        await session.cleanup(); return;
+        return;
       }
 
       // ─── Search ───
       const spinner = ora('搜索航班中...').start();
-      const result = await session.api.searchFlights({
+      const result = await api.searchFlights({
         depCity, arrCity, depDate: fields.date, adult: fields.adults,
       });
       spinner.stop();
@@ -431,12 +423,11 @@ program
       console.log(chalk.gray('─'.repeat(50)));
 
       const flights = displayFlights(result);
-      if (flights.length === 0) { await session.cleanup(); return; }
+      if (flights.length === 0) return;
 
       // ─── Flight selection ───
       let selectedFlight = null;
 
-      // Match by flight number if --flight-no is provided
       if (opts.flightNo) {
         const normalizedFlightNo = opts.flightNo.toUpperCase().replace(/\s+/g, '');
         selectedFlight = flights.find(
@@ -448,7 +439,7 @@ program
           for (const f of flights) {
             console.log(chalk.gray(`  [${f.index}] ${f.flightNo} ${f.depTime}→${f.arrTime}`));
           }
-          await session.cleanup(); return;
+          return;
         }
         console.log(chalk.cyan(`\n匹配到: [${selectedFlight.index}] ${selectedFlight.flightNo} ${selectedFlight.depTime}→${selectedFlight.arrTime}`));
       } else {
@@ -468,14 +459,14 @@ program
       let selectedBrand = null;
       if (selectedFlight.priceOptions.length === 0) {
         console.log(chalk.red('该航班无可用舱位'));
-        await session.cleanup(); return;
+        return;
       } else if (selectedFlight.priceOptions.length === 1) {
         selectedBrand = selectedFlight.priceOptions[0];
         cabinIdx = 0;
       } else if (cabinIdx != null) {
         if (cabinIdx < 0 || cabinIdx >= selectedFlight.priceOptions.length) {
           console.log(chalk.red(`舱位序号 ${cabinIdx} 超出范围`));
-          await session.cleanup(); return;
+          return;
         }
         selectedBrand = selectedFlight.priceOptions[cabinIdx];
       } else {
@@ -523,7 +514,7 @@ program
         Object.assign(contact, answers);
       }
 
-      // Find cabin index in flight data using flightItemIndex (not display index)
+      // Find cabin index in flight data using flightItemIndex
       const flightItem = result.data?.flightItems?.[selectedFlight.flightItemIndex];
       let realCabinIdx = 0;
       if (flightItem) {
@@ -540,7 +531,7 @@ program
       console.log(chalk.white(`乘机人: ${pax.name} (${pax.idNo})`));
       console.log(chalk.white(`联系人: ${contact.name} ${contact.phone}`));
 
-      // Safety check: verify flight number matches the API response at flightItemIndex
+      // Safety check
       const verifyItem = result.data?.flightItems?.[selectedFlight.flightItemIndex];
       if (verifyItem) {
         const verifySeg = verifyItem.flightInfos?.[0]?.flightSegments?.[0];
@@ -548,12 +539,11 @@ program
           const verifyNo = (verifySeg.carrierCode || verifySeg.airlineCode || '') + verifySeg.flightNo;
           if (verifyNo !== selectedFlight.flightNo) {
             console.log(chalk.yellow(`\n⚠ 警告: API数据中航班号 ${verifyNo} 与所选 ${selectedFlight.flightNo} 不匹配！`));
-            console.log(chalk.yellow('  可能是搜索结果发生了变化。建议使用 --flight-no 重新订票。'));
             if (!opts.yes) {
               const { forceContinue } = await inquirer.prompt([{
                 type: 'confirm', name: 'forceContinue', message: '航班号不匹配，仍要继续?', default: false,
               }]);
-              if (!forceContinue) { console.log(chalk.yellow('已取消。')); await session.cleanup(); return; }
+              if (!forceContinue) { console.log(chalk.yellow('已取消。')); return; }
             }
           }
         }
@@ -563,12 +553,12 @@ program
         const { confirmBook } = await inquirer.prompt([{
           type: 'confirm', name: 'confirmBook', message: '确认提交订单?', default: false,
         }]);
-        if (!confirmBook) { console.log(chalk.yellow('已取消。')); await session.cleanup(); return; }
+        if (!confirmBook) { console.log(chalk.yellow('已取消。')); return; }
       }
 
       // ─── Submit ───
       const bookSpinner = ora('正在提交订单...').start();
-      const bookingResult = await session.api.createBooking({
+      const bookingResult = await api.createBooking({
         searchResult: result,
         flightItemIndex: selectedFlight.flightItemIndex,
         cabinIndex: realCabinIdx,
@@ -578,11 +568,10 @@ program
       bookSpinner.stop();
 
       displayBookingResult(bookingResult);
-      await session.save();
     } catch (err) {
       console.error(chalk.red('订票过程出错:'), err.message);
     } finally {
-      await session.cleanup();
+      api.disconnect();
     }
   });
 
@@ -601,35 +590,25 @@ program
   .option('-p, --page <num>', 'Page number', '1')
   .addHelpText('after', '\nExamples:\n  $ ceair-cli orders\n  $ ceair-cli orders --all\n  $ ceair-cli orders --page 2')
   .action(async (opts) => {
-    const session = new SessionManager();
+    const api = requireApi();
     try {
-      const restored = await session.load();
-      if (!restored) {
-        console.log(chalk.yellow('请先登录: ceair-cli login'));
-        await session.cleanup();
-        return;
-      }
-
       const spinner = ora('查询订单...').start();
-      const result = await session.api.queryOrderList({ page: parseInt(opts.page) });
+      const result = await api.queryOrderList({ page: parseInt(opts.page) });
       spinner.stop();
 
       if (!result?.data) {
         console.log(chalk.red('查询失败:'), result?.resultMsg || '未知错误');
-        await session.cleanup();
         return;
       }
 
       const orders = result.data.list || [];
       if (!orders.length) {
         console.log(chalk.gray('暂无订单记录'));
-        await session.cleanup();
         return;
       }
 
       const today = new Date().toISOString().substring(0, 10);
 
-      // Separate future active orders from the rest
       const futureActive = [];
       const other = [];
       for (const o of orders) {
@@ -644,7 +623,6 @@ program
         }
       }
 
-      // Fetch details for future active orders
       if (futureActive.length > 0) {
         console.log(chalk.bold.green('\n  ╔══════════════════════════════════════╗'));
         console.log(chalk.bold.green('  ║       即将出行 / 待处理订单          ║'));
@@ -652,7 +630,7 @@ program
 
         for (const order of futureActive) {
           const detailSpinner = ora(`加载 ${order.tradeOrderNo}...`).start();
-          const detail = await session.api.getOrderDetail(order.tradeOrderNo).catch(() => null);
+          const detail = await api.getOrderDetail(order.tradeOrderNo).catch(() => null);
           detailSpinner.stop();
 
           const passengers = [];
@@ -668,7 +646,6 @@ program
                 for (const seg of trip.segmentList || []) {
                   pax.segments.push(seg);
                 }
-                // Check seat info
                 if (trip.seatList?.length > 0) {
                   const seatNames = trip.seatList
                     .filter(s => s.seatNo)
@@ -690,7 +667,6 @@ program
         }
       }
 
-      // Show other orders (compact list)
       if (opts.all && other.length > 0) {
         console.log(chalk.bold('\n  历史订单:\n'));
         const statusMap = {
@@ -723,7 +699,7 @@ program
     } catch (err) {
       console.error(chalk.red('查询出错:'), err.message);
     } finally {
-      await session.cleanup();
+      api.disconnect();
     }
   });
 
@@ -732,20 +708,12 @@ program
 program
   .command('cancel <orderNo>')
   .description('Cancel an unpaid order\n\n' +
-    '  <orderNo> is the tradeOrderNo from \"ceair-cli orders\".\n' +
-    '  Only unpaid orders (待支付) can be cancelled.\n' +
-    '  Unpaid orders auto-cancel when payment countdown expires.')
+    '  <orderNo> is the tradeOrderNo from "ceair-cli orders".\n' +
+    '  Only unpaid orders (待支付) can be cancelled.')
   .addHelpText('after', '\nExample:\n  $ ceair-cli cancel 123456789012345678')
   .action(async (orderNo) => {
-    const session = new SessionManager();
+    const api = requireApi();
     try {
-      const restored = await session.load();
-      if (!restored) {
-        console.log(chalk.yellow('请先登录: ceair-cli login'));
-        await session.cleanup();
-        return;
-      }
-
       const { confirmCancel } = await inquirer.prompt([
         {
           type: 'confirm',
@@ -757,12 +725,11 @@ program
 
       if (!confirmCancel) {
         console.log(chalk.yellow('已取消。'));
-        await session.cleanup();
         return;
       }
 
       const spinner = ora('取消订单中...').start();
-      const result = await session.api.cancelOrder(orderNo);
+      const result = await api.cancelOrder(orderNo);
       spinner.stop();
 
       if (result.resultCode === 'S200' || result.resultCode === 'A200') {
@@ -773,7 +740,7 @@ program
     } catch (err) {
       console.error(chalk.red('取消出错:'), err.message);
     } finally {
-      await session.cleanup();
+      api.disconnect();
     }
   });
 
@@ -831,7 +798,7 @@ program
         console.log(chalk.yellow('Usage: ceair-cli config set <key> <value>  (e.g. passenger.name 张三)'));
         return;
       }
-      const config = setConfig(key, value);
+      setConfig(key, value);
       console.log(chalk.green(`✓ ${key} = ${value}`));
       return;
     }
@@ -857,47 +824,7 @@ function flatten(obj, prefix = '') {
   return result;
 }
 
-// ─── Status / Logout / Cities ────────────────────────────────────
-
-program
-  .command('status')
-  .description('Check current login status and session validity')
-  .action(async () => {
-    const session = new SessionManager();
-    try {
-      const restored = await session.load();
-      if (restored) {
-        console.log(chalk.green('✓ 已登录'));
-        const info = session.userInfo;
-        if (info) {
-          if (info.name) console.log(chalk.white(`  用户: ${info.name}`));
-          if (info.cardNo) console.log(chalk.white(`  会员卡号: ${info.cardNo}`));
-        }
-      } else {
-        console.log(chalk.yellow('未登录'));
-        console.log(chalk.gray('使用 "ceair-cli login" 登录'));
-      }
-    } catch {
-      console.log(chalk.yellow('未登录'));
-    } finally {
-      await session.cleanup();
-    }
-  });
-
-program
-  .command('logout')
-  .description('Logout and clear saved session')
-  .action(async () => {
-    const session = new SessionManager();
-    try {
-      await session.logout();
-    } catch {
-      // ignore
-    } finally {
-      await session.cleanup();
-    }
-    console.log(chalk.green('已登出，会话已清除。'));
-  });
+// ─── Cities Command ──────────────────────────────────────────────
 
 program
   .command('cities')
@@ -930,12 +857,13 @@ program
 program
   .name('ceair-cli')
   .description(
-    '中国东方航空 CLI - 搜索航班、登录账号、在线订票\n' +
-    'China Eastern Airlines CLI - Search, Login & Book\n\n' +
+    '中国东方航空 CLI - 搜索航班、在线订票\n' +
+    'China Eastern Airlines CLI - Search & Book\n\n' +
     'Quick start:\n' +
-    '  1. ceair-cli login --method qrcode\n' +
+    '  1. ceair-cli session start       # 启动浏览器并登录\n' +
     '  2. ceair-cli search SHA BJS 2026-06-15\n' +
-    '  3. ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n\n' +
+    '  3. ceair-cli book -f SHA -t BJS -d 2026-06-15 --flight-no MU5101 --cabin 0 -y\n' +
+    '  4. ceair-cli session stop        # 关闭浏览器\n\n' +
     'Config defaults:\n' +
     '  ceair-cli config set passenger.name 张三\n' +
     '  ceair-cli config set passenger.phone 13800138000\n' +

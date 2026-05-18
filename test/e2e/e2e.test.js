@@ -1,8 +1,8 @@
 /**
  * End-to-end tests against the real ceair.com website.
  *
- * If no session exists, triggers QR code login automatically —
- * scan with 东方航空APP when prompted.
+ * Expects a running browser session. If no session exists,
+ * triggers QR code login automatically — scan with 东方航空APP.
  *
  * Run:
  *   npm run test:e2e
@@ -21,7 +21,7 @@ const chalk = require('chalk');
 const ora = require('ora');
 
 const CeairApi = require('../../src/api');
-const SessionManager = require('../../src/session');
+const pool = require('../../src/browser-pool');
 const { displayFlights, formatDate } = require('../../src/display');
 const { resolveCity, getCityName } = require('../../src/cities');
 
@@ -41,48 +41,52 @@ function* dateCandidates(primaryDate) {
   if (E2E_EXPLICIT_DATE) return; // human picked this date, don't override
   const d = new Date(primaryDate);
   for (const offset of [14, 3, 10, 21]) {
-    d.setDate(d.getDate() + offset - 7); // relative offsets from original
+    d.setDate(d.getDate() + offset - 7);
     yield d.toISOString().substring(0, 10);
-    d.setDate(d.getDate() - offset + 7); // reset
+    d.setDate(d.getDate() - offset + 7);
   }
 }
 
-const STATE_FILE = path.join(
-  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'),
-  'ceair-cli', 'browser-state.json'
-);
-
 let api = null;
-let session = null;
+let needCleanup = false; // did we start the session ourselves?
 
-// ─── Before: load or login ──────────────────────────────────────
+// ─── Before: ensure browser session ──────────────────────────────
 
 before(async () => {
-  session = new SessionManager();
+  const { running } = await pool.status();
 
-  // Try loading existing session
-  let loaded = false;
-  if (fs.existsSync(STATE_FILE)) {
-    try { loaded = await session.load(); } catch { loaded = false; }
-  }
+  if (running) {
+    // Reuse existing session
+    console.log(chalk.green('✓ Reusing existing browser session'));
+  } else {
+    // No session — start one with QR login
+    console.log(chalk.yellow('\nNo browser session found. Starting QR login...\n'));
 
-  if (!loaded) {
-    // No valid session — do QR login
-    console.log(chalk.yellow('\nNo valid session found. Starting QR login...\n'));
+    const spinner = ora('Launching browser...').start();
+    let wsEndpoint;
+    try {
+      ({ wsEndpoint } = await pool.launch());
+    } catch (err) {
+      spinner.fail(err.message);
+      throw err;
+    }
+    spinner.succeed('Browser launched');
+    needCleanup = true;
 
-    const loginApi = session.api;
-    await loginApi._ensureBrowser(true);
+    // Connect for QR login
+    const browser = await require('playwright').chromium.connectOverCDP(wsEndpoint);
+    const context = browser.contexts()[0];
+    const page = context.pages()[0];
 
-    // Navigate to SSO page and extract UUID from Vue component
-    const spinner = ora('Getting QR code...').start();
-    await loginApi.page.goto(
+    // Navigate to SSO page
+    const qrSpinner = ora('Getting QR code...').start();
+    await page.goto(
       'https://sso.ceair.com/new/login?type=ffp&lang=zh_CNY',
       { waitUntil: 'domcontentloaded', timeout: 30000 }
     );
-    // Wait for Vue to hydrate
-    await loginApi.page.waitForTimeout(6000);
+    await page.waitForTimeout(6000);
 
-    const uuidData = await loginApi.page.evaluate(() => {
+    const { uuid } = await page.evaluate(() => {
       const app = document.querySelector('#app');
       if (!app || !app.__vue__) return { uuid: null };
       function findComponent(comp, depth = 0) {
@@ -98,22 +102,19 @@ before(async () => {
       return { uuid: login?.uuid || null };
     });
 
-    const { uuid } = uuidData;
-
     if (!uuid) {
-      spinner.fail('Failed to get QR code');
-      throw new Error('Could not get QR UUID from SSO page');
+      qrSpinner.fail('Failed to get QR code');
+      throw new Error('Could not get QR UUID');
     }
-    spinner.stop();
+    qrSpinner.stop();
 
-    // Display QR in terminal
     const qrContent = `uuid=${uuid}`;
     console.log(chalk.bold('\n请使用 东方航空APP 扫描以下二维码登录：\n'));
     qrcode.generate(qrContent, { small: true });
     console.log(chalk.gray(`\nQR content: ${qrContent}`));
     console.log(chalk.gray('Expires in 2 minutes.\n'));
 
-    // Poll for scan confirmation
+    // Poll for scan
     const pollSpinner = ora('Waiting for scan... (0s / 120s)').start();
     const startTime = Date.now();
     const TIMEOUT_MS = 120_000;
@@ -121,26 +122,25 @@ before(async () => {
     let scanned = false;
     let loginDone = false;
 
-    // Capture ssouserid from component polling
     let ssouserid = null;
     const captureHandler = (req) => {
       if (req.url().includes('isconfirmbyscan') && !ssouserid) {
         ssouserid = req.headers()['ssouserid'];
       }
     };
-    loginApi.page.on('request', captureHandler);
+    page.on('request', captureHandler);
 
     for (let wait = 0; wait < 10 && !ssouserid; wait++) {
-      await loginApi.page.waitForTimeout(1000);
+      await page.waitForTimeout(1000);
     }
 
     if (ssouserid) {
-      loginApi.page.off('request', captureHandler);
-      await loginApi.page.evaluate(() => {
+      page.off('request', captureHandler);
+      await page.evaluate(() => {
         const app = document.querySelector('#app');
         if (!app || !app.__vue__) return;
         function findComponent(comp, depth = 0) {
-          if (!comp || depth > 10) return null;
+          if (depth > 10) return null;
           if (comp.$options?.methods?.getUUID) return comp;
           for (const child of comp.$children || []) {
             const found = findComponent(child, depth + 1);
@@ -157,7 +157,7 @@ before(async () => {
     }
 
     while (Date.now() - startTime < TIMEOUT_MS) {
-      const pollResult = await loginApi.page.evaluate(async ({ uuid, ssouserid }) => {
+      const pollResult = await page.evaluate(async ({ uuid, ssouserid }) => {
         try {
           const resp = await fetch('/mumember/api/sso/login/isconfirmbyscan', {
             method: 'POST',
@@ -181,7 +181,7 @@ before(async () => {
 
       if (content.isScanExpire || pollResult?.resultCode === '-100') {
         pollSpinner.fail('QR code expired');
-        throw new Error('QR code expired — run tests again');
+        throw new Error('QR code expired');
       }
 
       if (content.isLogin) {
@@ -191,37 +191,41 @@ before(async () => {
         let navOk = false;
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            await loginApi.page.goto('https://www.ceair.com/zh/cny/home', {
+            await page.goto('https://www.ceair.com/zh/cny/home', {
               waitUntil: 'domcontentloaded', timeout: 30000,
             });
-            await loginApi.page.waitForTimeout(4000);
-            const hasNuxt = await loginApi.page.evaluate(() => !!window.$nuxt);
+            await page.waitForTimeout(4000);
+            const hasNuxt = await page.evaluate(() => !!window.$nuxt);
             if (hasNuxt) { navOk = true; break; }
           } catch {}
-          await loginApi.page.waitForTimeout(2000);
+          await page.waitForTimeout(2000);
         }
 
-        await session.save();
         pollSpinner.succeed(chalk.green('✓ QR login successful!'));
 
-        if (!navOk) {
-          console.log(chalk.yellow('  ⚠ Homepage blocked by WAF, session may be unstable.'));
-        }
-
+        // Get user info
         try {
-          const check = await loginApi.checkToken();
+          const tmpApi = new CeairApi();
+          tmpApi.browser = browser;
+          tmpApi.context = context;
+          tmpApi.page = page;
+          const check = await tmpApi.checkToken();
           if (check.data) {
             const name = check.data.name || check.data.userName || check.data.memberName;
-            if (name) console.log(chalk.white(`  User: ${name}`));
+            if (name) { console.log(chalk.white(`  User: ${name}`)); global._testUserName = name; }
             if (check.data.ffpCardNo) console.log(chalk.white(`  Card: ${check.data.ffpCardNo}`));
+        pool.setUser({ name, cardNo: check.data.ffpCardNo });
           }
         } catch {}
+
+        // Disconnect (keep alive)
+        browser.close();
         break;
       }
 
       if (content.isScan && !scanned) {
         scanned = true;
-        pollSpinner.text = chalk.cyan('✋ Scanned! Tap confirm on your phone...');
+        pollSpinner.text = chalk.cyan('✋ Scanned! Tap confirm...');
       } else if (!scanned) {
         pollSpinner.text = `Waiting for scan... (${elapsed}s / 120s)`;
       }
@@ -229,30 +233,33 @@ before(async () => {
       await new Promise(r => setTimeout(r, POLL_MS));
     }
 
-    if (!loginDone) {
-      pollSpinner.fail('Login timed out');
-      throw new Error('Login timed out — run tests again');
+      if (!loginDone) {
+        pollSpinner.fail('Login timed out');
+        throw new Error('Login timed out');
+      }
     }
-  }
 
-  // At this point we must have a working session
-  api = session.api;
+  // Now we have a running session — create an API instance for tests
+  api = new CeairApi();
+  await api.connect();
 
-  // After QR login, the page is on the SSO domain.
-  // _ensureNuxtReady will navigate to homepage and wait for Nuxt.
+  // Verify Nuxt is ready
   await api._ensureNuxtReady();
 
-  // Verify login
   const isLogin = await api.page.evaluate(() =>
     window.$nuxt?.$store?.state?.user?.isLogin === true
   );
   if (!isLogin) {
-    throw new Error('Login succeeded but session is invalid — try running again');
+    throw new Error('Session exists but not logged in. Try `ceair-cli session start`.');
   }
 });
 
 after(async () => {
-  if (session) await session.cleanup();
+  if (api) api.disconnect();
+  // If we started the session, stop it
+  if (needCleanup) {
+    await pool.kill();
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════
@@ -273,8 +280,6 @@ describe('Session', () => {
 
   it('checkToken API returns a valid response', async () => {
     const result = await api.checkToken();
-    // checkToken is unreliable (often returns A403 for idle sessions)
-    // Just verify it responds, not that it succeeds
     assert.ok(result.resultCode, 'Should return a resultCode');
     assert.ok(['A200', 'A403', 'T200'].includes(result.resultCode),
       `Unexpected resultCode: ${result.resultCode}`);
@@ -325,7 +330,6 @@ describe('Search flights', () => {
     assert.ok(Array.isArray(items), 'data.flightItems should be array');
     assert.ok(items.length > 0, 'Should return at least 1 flight');
 
-    // Stash for next tests
     global._searchResult = result;
 
     for (const item of items) {
@@ -434,7 +438,6 @@ describe('Non-MU booking', () => {
         });
 
         if (attempt.resultCode === 'S200' && attempt.data?.flightItems?.length > 0) {
-          // Look for a non-MU flight (CA, CZ, FM, HO, etc.)
           const flights = displayFlights(attempt);
           nonMuFlight = flights.find(f => !f.flightNo.startsWith('MU') && !f.flightNo.startsWith('KN'));
           if (nonMuFlight) {
@@ -448,15 +451,13 @@ describe('Non-MU booking', () => {
       if (result) break;
     }
 
-    // If no non-MU flights available, skip gracefully
     if (!nonMuFlight) {
-      console.log(chalk.yellow('  ℹ No non-MU flights found on any route/date — skipping booking test'));
+      console.log(chalk.yellow('  ℹ No non-MU flights found — skipping booking test'));
       return;
     }
 
     console.log(chalk.cyan(`  Booking non-MU flight: ${nonMuFlight.flightNo} (index ${nonMuFlight.flightItemIndex})`));
 
-    // Try to book — currently expected to fail at addServices.submit()
     const bookingResult = await api.createBooking({
       searchResult: result,
       flightItemIndex: nonMuFlight.flightItemIndex,
@@ -466,13 +467,11 @@ describe('Non-MU booking', () => {
     }).catch(e => ({ _error: e.message }));
 
     if (bookingResult?._error) {
-      // Expected: addServices submit fails for non-MU flights (Bug #3)
       console.log(chalk.yellow(`  ⚠ Booking failed (known Bug #3): ${bookingResult._error}`));
       return;
     }
 
     if (bookingResult?.resultCode === 'A200' || bookingResult?.resultCode === 'S200') {
-      // Booking succeeded! Cancel the test order
       const orderNo = bookingResult.orderNo || bookingResult.data?.orderNo;
       console.log(chalk.green(`  ✅ Non-MU booking succeeded! Order: ${orderNo}`));
 
@@ -487,7 +486,6 @@ describe('Non-MU booking', () => {
       return;
     }
 
-    // Some other failure
     console.log(chalk.yellow(`  ⚠ Booking returned: ${bookingResult?.resultCode} ${bookingResult?.resultMsg || ''}`));
   });
 });
@@ -499,7 +497,6 @@ describe('Non-MU booking', () => {
 describe('Orders', () => {
 
   it('queryOrderList returns success with a list', async () => {
-    // Navigate back to homepage first (search may have left us on /shopping/)
     await api._ensureNuxtReady();
 
     const result = await api.queryOrderList({ page: 1 });
@@ -514,7 +511,6 @@ describe('Orders', () => {
     const orders = result.data?.list || [];
 
     if (orders.length === 0) {
-      // No orders is valid — just verify the structure
       assert.ok(true, 'No orders, structure valid');
       return;
     }
@@ -539,35 +535,5 @@ describe('Orders', () => {
 
     assert.ok(detail, 'Should return a result');
     assert.ok(detail.resultCode, 'Should have resultCode');
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════
-// Session persistence
-// ═══════════════════════════════════════════════════════════════════
-
-describe('Session persistence', () => {
-
-  it('save + load roundtrip works', async () => {
-    await api._ensureNuxtReady();
-    await api.saveState();
-
-    assert.ok(fs.existsSync(STATE_FILE), 'State file should exist');
-    const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf-8'));
-    assert.ok(state.cookies?.length > 0, 'Should have cookies');
-
-    const hasLoginCookie = state.cookies.some(c =>
-      c.name === 'ceair.login.token' || c.name === 'com.ceair.cesso'
-    );
-    assert.ok(hasLoginCookie, 'Should have login cookie');
-
-    // Load with a fresh SessionManager
-    const session2 = new SessionManager();
-    const loaded = await session2.load();
-    assert.ok(loaded, 'Fresh SessionManager should load the saved session');
-
-    const info = session2.userInfo;
-    assert.ok(info?.name, 'Should have user name');
-    await session2.cleanup();
   });
 });

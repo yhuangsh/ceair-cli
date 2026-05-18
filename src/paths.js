@@ -10,6 +10,8 @@ const os = require('os');
 const XDG_CONFIG = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
 const DATA_DIR = path.join(XDG_CONFIG, 'ceair-cli');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+
+// Legacy state file (kept for migration check)
 const STATE_FILE = path.join(DATA_DIR, 'browser-state.json');
 
 /**
@@ -23,9 +25,9 @@ function ensureDir() {
 
 /**
  * Migrate from legacy locations:
- *   ~/.ceair-booking/browser-state.json → ~/.config/ceair-cli/browser-state.json
- *   ~/.ceair-booking/config.json         → ~/.config/ceair-cli/config.json
- *   ~/.config/ceair/config.json          → ~/.config/ceair-cli/config.json
+ *   ~/.ceair-booking/ → ~/.config/ceair-cli/
+ *   ~/.config/ceair/   → ~/.config/ceair-cli/
+ * Only migrates config.json (browser-state.json is no longer used).
  */
 function migrate() {
   const legacyPaths = [
@@ -34,13 +36,11 @@ function migrate() {
   ];
 
   for (const oldDir of legacyPaths) {
-    for (const file of ['browser-state.json', 'config.json']) {
-      const oldPath = path.join(oldDir, file);
-      const newPath = path.join(DATA_DIR, file);
-      if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
-        ensureDir();
-        fs.copyFileSync(oldPath, newPath);
-      }
+    const oldConfig = path.join(oldDir, 'config.json');
+    const newConfig = CONFIG_FILE;
+    if (fs.existsSync(oldConfig) && !fs.existsSync(newConfig)) {
+      ensureDir();
+      fs.copyFileSync(oldConfig, newConfig);
     }
   }
 }
