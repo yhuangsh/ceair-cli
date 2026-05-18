@@ -65,20 +65,26 @@ async function sessionStart(opts) {
   );
   await page.waitForTimeout(5000);
 
-  const { uuid } = await page.evaluate(() => {
-    const app = document.querySelector('#app').__vue__;
-    function findComponent(comp, depth = 0) {
-      if (depth > 10) return null;
-      if (comp.$options?.methods?.getUUID) return comp;
-      for (const child of comp.$children || []) {
-        const found = findComponent(child, depth + 1);
-        if (found) return found;
+  // Wait for the SSO Vue component to mount (retry up to 15s)
+  let uuid = null;
+  for (let attempt = 0; attempt < 10 && !uuid; attempt++) {
+    uuid = await page.evaluate(() => {
+      const app = document.querySelector('#app');
+      if (!app?.__vue__) return null;
+      function findComponent(comp, depth = 0) {
+        if (depth > 10) return null;
+        if (comp.$options?.methods?.getUUID) return comp;
+        for (const child of comp.$children || []) {
+          const found = findComponent(child, depth + 1);
+          if (found) return found;
+        }
+        return null;
       }
-      return null;
-    }
-    const login = findComponent(app);
-    return { uuid: login.uuid };
-  });
+      const login = findComponent(app.__vue__);
+      return login?.uuid || null;
+    });
+    if (!uuid) await page.waitForTimeout(1500);
+  }
 
   if (!uuid) {
     uuidSpinner.fail('获取二维码失败');
@@ -115,7 +121,8 @@ async function sessionStart(opts) {
   if (ssouserid) {
     page.off('request', captureHandler);
     await page.evaluate(() => {
-      const app = document.querySelector('#app').__vue__;
+      const app = document.querySelector('#app');
+      if (!app?.__vue__) return;
       function findComponent(comp, depth = 0) {
         if (depth > 10) return null;
         if (comp.$options?.methods?.getUUID) return comp;
@@ -125,12 +132,14 @@ async function sessionStart(opts) {
         }
         return null;
       }
-      const login = findComponent(app);
-      if (login) {
-        clearInterval(login.scanrecur);
-        clearTimeout(login.scanrecur);
-      }
-    });
+      try {
+        const login = findComponent(app.__vue__);
+        if (login) {
+          clearInterval(login.scanrecur);
+          clearTimeout(login.scanrecur);
+        }
+      } catch {}
+    }).catch(() => {});
   }
 
   while (Date.now() - startTime < TIMEOUT_MS) {

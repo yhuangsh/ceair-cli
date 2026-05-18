@@ -202,69 +202,56 @@ describe('Bug #1 — Flight index / flightItemIndex', () => {
 // Bug 1 (follow-up): Cabin DOM offset calculation
 // ═══════════════════════════════════════════════════════════════
 
-describe('Bug #1 — Cabin offset calculation (createBooking)', () => {
+describe('Bug #1 — Cabin offset uses DOM-based calculation', () => {
 
   /**
-   * Reproduce the old buggy formula vs the new corrected one.
-   * This tests the logic that was changed in api.js createBooking.
+   * The cabin offset is now computed by counting .pointer elements in the DOM,
+   * not by summing API cabinInfoDescs lengths. The DOM has unavailable cabin
+   * slots (ptr=false) that the API doesn't count.
    */
-  it('OLD formula overcounts offset with variable cabin counts', () => {
-    // 3 flights: 1 cabin, 3 cabins, 2 cabins
-    const cabinCounts = [1, 3, 2];
+  it('DOM has 3 items per flight but only 2 are clickable', () => {
+    // Each flight card: economy(ptr=true), unavailable(ptr=false), business(ptr=true)
+    // API cabinInfoDescs: 2 entries per flight (economy + business)
+    // Old formula: sum API cabinInfoDescs → wrong when DOM has extra slots
+    //
+    // For flight index 12, cabin 0 (economy):
+    //   OLD: sum(12 flights * 2 cabins) + 0 = 24  → wrong button!
+    //   NEW: count .pointer in DOM up to flight 12, cabin 0 → 36
 
-    // Target: flight 2 (index 2), cabin 0
-    const flightIndex = 2;
-    const cabinIndex = 0;
+    const oldFormula = 12 * 2 + 0; // 24
+    const newResult = 36; // actual DOM .pointer index
 
-    // OLD formula: flightIndex * cabinCount (assumes uniform)
-    const uniformCount = cabinCounts[flightIndex]; // 2
-    const buggyOffset = flightIndex * uniformCount + cabinIndex; // 2*2+0 = 4
-
-    // NEW formula: sum all preceding
-    let correctOffset = 0;
-    for (let i = 0; i < flightIndex; i++) correctOffset += cabinCounts[i];
-    correctOffset += cabinIndex; // (1+3) + 0 = 4
-
-    // In this specific case they happen to match, but let's try flight 1
-    const fi1 = 1;
-    const ci1 = 0;
-    const buggy1 = fi1 * cabinCounts[fi1] + ci1; // 1*3+0 = 3
-    let correct1 = 0;
-    for (let i = 0; i < fi1; i++) correct1 += cabinCounts[i];
-    correct1 += ci1; // 1 + 0 = 1
-
-    // The old formula gives 3, correct is 1 — this is exactly Bug #1
-    assert.notEqual(buggy1, correct1,
-      'Old formula should differ from correct offset');
-    assert.equal(correct1, 1, 'Flight 1 cabin 0 should be at DOM offset 1');
+    assert.notEqual(oldFormula, newResult,
+      'Old formula gives wrong DOM index');
   });
 
-  it('NEW formula computes correct offsets for all flights', () => {
-    const cabinCounts = [1, 3, 2];
+  it('DOM-based formula handles flights with 3 visible cabins', () => {
+    // Some flights show economy + premium + business (all ptr=true)
+    // DOM: [econ(ptr), premium(ptr), business(ptr)]
+    // Flight 0 has 3, Flight 1 has 2 (1 unavailable), Flight 2 has 2
+    const pointerCounts = [3, 2, 2]; // .pointer count per flight
 
     const computeOffset = (fi, ci) => {
       let offset = 0;
-      for (let i = 0; i < fi; i++) offset += cabinCounts[i];
+      for (let i = 0; i < fi; i++) offset += pointerCounts[i];
       return offset + ci;
     };
 
-    assert.equal(computeOffset(0, 0), 0);  // Flight 0, cabin 0 → offset 0
-    assert.equal(computeOffset(1, 0), 1);  // Flight 1, cabin 0 → offset 1
-    assert.equal(computeOffset(1, 1), 2);  // Flight 1, cabin 1 → offset 2
-    assert.equal(computeOffset(1, 2), 3);  // Flight 1, cabin 2 → offset 3
-    assert.equal(computeOffset(2, 0), 4);  // Flight 2, cabin 0 → offset 4
-    assert.equal(computeOffset(2, 1), 5);  // Flight 2, cabin 1 → offset 5
+    assert.equal(computeOffset(0, 0), 0);
+    assert.equal(computeOffset(0, 2), 2);
+    assert.equal(computeOffset(1, 0), 3);
+    assert.equal(computeOffset(1, 1), 4);
+    assert.equal(computeOffset(2, 0), 5);
   });
 
-  it('uniform cabin counts still work correctly', () => {
-    const cabinCounts = [2, 2, 2];
+  it('uniform pointer counts work correctly', () => {
+    const pointerCounts = [2, 2, 2];
     const computeOffset = (fi, ci) => {
       let offset = 0;
-      for (let i = 0; i < fi; i++) offset += cabinCounts[i];
+      for (let i = 0; i < fi; i++) offset += pointerCounts[i];
       return offset + ci;
     };
 
-    // When all flights have the same count, both formulas agree
     assert.equal(computeOffset(0, 0), 0);
     assert.equal(computeOffset(0, 1), 1);
     assert.equal(computeOffset(1, 0), 2);

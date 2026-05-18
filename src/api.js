@@ -369,6 +369,14 @@ class CeairApi {
     // We should already be on the shopping page after searchFlights
     await this._dismissModals();
 
+    // Wait for shopping page cabin elements to render (may need a moment)
+    try {
+      await page.waitForSelector('.cabin-level-item', { timeout: 15000 });
+    } catch {
+      // If no cabin items, we may have navigated away — try going back to shopping
+      throw new Error('购物页面未加载，请重新搜索后重试');
+    }
+
     const flightItems = searchResult?.data?.flightItems || [];
     if (flightItemIndex >= flightItems.length) {
       throw new Error(`航班序号 ${flightItemIndex} 超出范围`);
@@ -381,12 +389,72 @@ class CeairApi {
       ? (expectedSeg.carrierCode || expectedSeg.airlineCode || '') + expectedSeg.flightNo
       : null;
 
-    // Calculate correct DOM offset by summing cabin counts of all preceding flights
-    let targetCabinOffset = 0;
-    for (let i = 0; i < flightItemIndex; i++) {
-      targetCabinOffset += flightItems[i].cabinInfoDescs?.length || 1;
+    // Calculate correct DOM offset for the cabin price button.
+    // The DOM has .cabin-level-item elements per flight, including unavailable
+    // slots (ptr=false). We must count .pointer elements in the DOM, not
+    // cabinInfoDescs from the API, because the counts differ.
+    // Strategy: find the Nth flight's cabin area, then click the Mth .pointer
+    // within that flight.
+    const domOffset = await page.evaluate(({ flightItemIndex, cabinIndex }) => {
+      // Each flight has a container with flight number text.
+      // Walk all .cabin-level-item elements and group them by flight.
+      const allItems = document.querySelectorAll('.cabin-level-item');
+      let currentFlightIdx = -1;
+      let lastFlightNo = null;
+      let ptrCountInCurrentFlight = 0;
+      let targetButtonIdx = -1;
+      let globalPtrIdx = 0;
+      const debug = [];
+
+      for (const item of allItems) {
+        // Detect flight boundary: walk up to find flight number
+        let flightNo = null;
+        let el = item;
+        for (let d = 0; d < 20; d++) {
+          el = el.parentElement;
+          if (!el) break;
+          const spans = el.querySelectorAll('span');
+          for (const s of spans) {
+            if (s.textContent?.match(/^[A-Z]{2}\d{3,4}$/)) {
+              flightNo = s.textContent.trim();
+              break;
+            }
+          }
+          if (flightNo) break;
+        }
+
+        if (flightNo !== lastFlightNo) {
+          if (currentFlightIdx >= flightItemIndex - 1 && currentFlightIdx <= flightItemIndex + 1) {
+            debug.push({fi: currentFlightIdx, fn: lastFlightNo, ptrs: ptrCountInCurrentFlight});
+          }
+          currentFlightIdx++;
+          lastFlightNo = flightNo;
+          ptrCountInCurrentFlight = 0;
+        }
+
+        const isPointer = item.classList.contains('pointer');
+        if (!isPointer) continue;
+
+        if (currentFlightIdx === flightItemIndex) {
+          if (ptrCountInCurrentFlight === cabinIndex) {
+            targetButtonIdx = globalPtrIdx;
+            break;
+          }
+          ptrCountInCurrentFlight++;
+        }
+        globalPtrIdx++;
+      }
+      // Add last flight
+      debug.push({fi: currentFlightIdx, fn: lastFlightNo, ptrs: ptrCountInCurrentFlight});
+
+      return { targetButtonIdx, debug, totalItems: allItems.length };
+    }, { flightItemIndex, cabinIndex });
+
+    console.error('[booking] DOM scan result:', JSON.stringify(domOffset));
+
+    if (domOffset.targetButtonIdx < 0) {
+      throw new Error(`无法定位到航班 ${expectedFlightNo} 的第 ${cabinIndex} 个舱位按钮`);
     }
-    targetCabinOffset += cabinIndex;
 
     // Verify we're on the right search results page
     const currentUrl = page.url();
@@ -417,16 +485,16 @@ class CeairApi {
     await page.evaluate((idx) => {
       const btns = document.querySelectorAll('.cabin-select.pointer');
       if (btns[idx]) btns[idx].scrollIntoView({ block: 'center' });
-    }, targetCabinOffset);
+    }, domOffset.targetButtonIdx);
     await page.waitForTimeout(500);
 
     // Click the target cabin price
     const priceButtons = await page.locator('.cabin-select.pointer').all();
-    if (targetCabinOffset >= priceButtons.length) {
+    if (domOffset.targetButtonIdx >= priceButtons.length) {
       throw new Error('无法定位到所选航班的价格按钮');
     }
 
-    await priceButtons[targetCabinOffset].click({ force: true });
+    await priceButtons[domOffset.targetButtonIdx].click({ force: true });
     await page.waitForResponse(
       (resp) => resp.url().includes('fareDetail'),
       { timeout: 15000 }
@@ -438,7 +506,7 @@ class CeairApi {
     const selectVisible = await selectBtn.isVisible().catch(() => false);
     if (!selectVisible) {
       await this._dismissModals();
-      await priceButtons[targetCabinOffset].click({ force: true });
+      await priceButtons[domOffset.targetButtonIdx].click({ force: true });
       await page.waitForResponse(
         (resp) => resp.url().includes('fareDetail'),
         { timeout: 15000 }
