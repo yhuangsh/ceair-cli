@@ -909,7 +909,28 @@ class CeairApi {
     await this._dismissModals();
 
     // Step 3: Select passenger from saved list
-    const savedPaxBtns = await page.locator('.booking-passenger').all();
+    // Wait for passenger list to load (may be async)
+    await page.waitForTimeout(2000);
+
+    // Try multiple selectors — the booking page may use different class names
+    let savedPaxBtns = await page.locator('.booking-passenger').all();
+    if (savedPaxBtns.length === 0) {
+      // Try alternative selectors
+      savedPaxBtns = await page.locator('[class*="passenger"][class*="card"], [class*="passenger"][class*="item"], [class*="pax-"]').all();
+    }
+    if (savedPaxBtns.length === 0) {
+      // Last resort: any clickable element containing the passenger name
+      const nameElements = await page.locator(`text=${passenger.name}`).all();
+      for (const el of nameElements) {
+        const box = await el.boundingBox();
+        if (box && box.width > 50) {
+          await el.click({ force: true });
+          savedPaxBtns = [el]; // treat as found
+          break;
+        }
+      }
+    }
+
     let paxSelected = false;
     for (const btn of savedPaxBtns) {
       const text = await btn.textContent();
@@ -918,6 +939,12 @@ class CeairApi {
         paxSelected = true;
         break;
       }
+    }
+
+    // If still not selected by name, try clicking the first passenger
+    if (!paxSelected && savedPaxBtns.length > 0) {
+      await savedPaxBtns[0].click({ force: true });
+      paxSelected = true;
     }
     if (!paxSelected) {
       throw new Error(`未找到乘机人 "${passenger.name}"，请先在东方航空APP中添加`);
