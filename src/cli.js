@@ -735,22 +735,25 @@ program
   .description('Cancel an unpaid order\n\n' +
     '  <orderNo> is the tradeOrderNo from "ceair-cli orders".\n' +
     '  Only unpaid orders (待支付) can be cancelled.')
-  .addHelpText('after', '\nExample:\n  $ ceair-cli cancel 123456789012345678')
-  .action(async (orderNo) => {
+  .option('-y, --yes', 'Skip confirmation prompt')
+  .addHelpText('after', '\nExamples:\n  $ ceair-cli cancel 123456789012345678\n  $ ceair-cli cancel 123456789012345678 -y')
+  .action(async (orderNo, opts) => {
     const api = requireApi();
     try {
-      const { confirmCancel } = await inquirer.prompt([
-        {
-          type: 'confirm',
-          name: 'confirmCancel',
-          message: `确认取消订单 ${orderNo}?`,
-          default: false,
-        },
-      ]);
+      if (!opts.yes) {
+        const { confirmCancel } = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'confirmCancel',
+            message: `确认取消订单 ${orderNo}?`,
+            default: false,
+          },
+        ]);
 
-      if (!confirmCancel) {
-        console.log(chalk.yellow('已取消。'));
-        return;
+        if (!confirmCancel) {
+          console.log(chalk.yellow('已取消。'));
+          return;
+        }
       }
 
       const spinner = ora('取消订单中...').start();

@@ -150,7 +150,14 @@ Orders are created in **unpaid** state. Complete payment on the [CEAir website](
 | #3 | Non-MU flights crash at addServices.submit() | Open |
 | #4 | cancelOrder fails on ERROR/FETCH_ERROR | v1.1.0 |
 | #5 | localStorage/sessionStorage not cleared on logout | v1.1.0 |
-| #6 | DOM cabin offset uses API counts instead of actual DOM elements — booked wrong cabin (¥4,180 instead of ¥550) | v1.2.0 |
+| #6 | DOM cabin offset uses API counts — booked wrong cabin (¥4,180 instead of ¥550) | v1.2.0 |
+
+### v1.3.0 Changes
+
+- **Session model**: `login`/`logout` → `session start`/`stop` with persistent CDP browser
+- **Cabin selection**: `--cabin` accepts class names (economy/business/first/premium, picks cheapest) and fare subclass codes (V/K/I, exact match)
+- **Cancel `-y` flag**: `ceair-cli cancel <orderNo> -y` skips confirm prompt
+- **Session start fix**: race condition on login redirect no longer crashes
 
 ## Architecture
 

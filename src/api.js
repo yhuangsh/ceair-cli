@@ -142,7 +142,6 @@ class CeairApi {
       adult = 1,
       child = 0,
       infant = 0,
-      cabinLevel = '',
     } = params;
 
     const { getCityName } = require('./cities');
