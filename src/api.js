@@ -359,6 +359,7 @@ class CeairApi {
       searchResult,
       flightItemIndex = 0,
       cabinIndex = 0,
+      cabinType = 'Y', // Y=economy, W=premium, J=business, F=first
       passenger,
       contact,
     } = params;
@@ -389,18 +390,19 @@ class CeairApi {
       : null;
 
     // Calculate correct DOM offset for the cabin price button.
-    // The DOM has .cabin-level-item elements per flight, including unavailable
-    // slots (ptr=false). We must count .pointer elements in the DOM, not
-    // cabinInfoDescs from the API, because the counts differ.
-    // Strategy: find the Nth flight's cabin area, then click the Mth .pointer
-    // within that flight.
-    const domOffset = await page.evaluate(({ flightItemIndex, cabinIndex }) => {
-      // Each flight has a container with flight number text.
-      // Walk all .cabin-level-item elements and group them by flight.
+    // The DOM has .cabin-level-item elements per flight. Each flight card
+    // shows cabin CLASS buttons (economy, premium, business) — not individual
+    // fare subclasses. We match by cabinType (Y/W/J/F) to find the right
+    // button within the target flight.
+    //
+    // MU flights: 3 items (economy ptr, unavailable !ptr, business ptr)
+    // Non-MU:     3 items (economy ptr, premium ptr, business ptr) — all ptr
+    //
+    // cabinType=Y → 1st pointer, cabinType=W → 2nd pointer, cabinType=J/F → last pointer
+    const domOffset = await page.evaluate(({ flightItemIndex, cabinType }) => {
       const allItems = document.querySelectorAll('.cabin-level-item');
       let currentFlightIdx = -1;
       let lastFlightNo = null;
-      let ptrCountInCurrentFlight = 0;
       let targetButtonIdx = -1;
       let globalPtrIdx = 0;
 
@@ -424,26 +426,80 @@ class CeairApi {
         if (flightNo !== lastFlightNo) {
           currentFlightIdx++;
           lastFlightNo = flightNo;
-          ptrCountInCurrentFlight = 0;
         }
 
         const isPointer = item.classList.contains('pointer');
         if (!isPointer) continue;
 
         if (currentFlightIdx === flightItemIndex) {
-          if (ptrCountInCurrentFlight === cabinIndex) {
+          // Determine cabin class from button position within this flight
+          // Count how many pointers we've seen for THIS flight so far
+          let ptrsBeforeThis = 0;
+          for (const prev of allItems) {
+            if (prev === item) break;
+            // Check if prev belongs to the same flight
+            let prevFn = null;
+            let pEl = prev;
+            for (let d = 0; d < 20; d++) {
+              pEl = pEl.parentElement;
+              if (!pEl) break;
+              const spans = pEl.querySelectorAll('span');
+              for (const s of spans) {
+                if (s.textContent?.match(/^[A-Z]{2}\d{3,4}$/)) {
+                  prevFn = s.textContent.trim();
+                  break;
+                }
+              }
+              if (prevFn) break;
+            }
+            if (prevFn === flightNo && prev.classList.contains('pointer')) {
+              ptrsBeforeThis++;
+            }
+          }
+
+          // Map cabinType to pointer position:
+          // Y=economy → 1st ptr, W=premium → 2nd ptr, J/F=business → 3rd (last) ptr
+          const wantFirst = (cabinType === 'Y');
+          const wantSecond = (cabinType === 'W');
+          const wantLast = (cabinType === 'J' || cabinType === 'F');
+
+          // Collect all pointers for this flight to know total count
+          let totalPtrs = 0;
+          for (const fi of allItems) {
+            let fiFn = null;
+            let fiEl = fi;
+            for (let d = 0; d < 20; d++) {
+              fiEl = fiEl.parentElement;
+              if (!fiEl) break;
+              const spans = fiEl.querySelectorAll('span');
+              for (const s of spans) {
+                if (s.textContent?.match(/^[A-Z]{2}\d{3,4}$/)) {
+                  fiFn = s.textContent.trim();
+                  break;
+                }
+              }
+              if (fiFn) break;
+            }
+            if (fiFn === flightNo && fi.classList.contains('pointer')) totalPtrs++;
+          }
+
+          let isMatch = false;
+          if (wantFirst && ptrsBeforeThis === 0) isMatch = true;
+          else if (wantSecond && ptrsBeforeThis === 1) isMatch = true;
+          else if (wantLast && ptrsBeforeThis === totalPtrs - 1) isMatch = true;
+
+          if (isMatch) {
             targetButtonIdx = globalPtrIdx;
             break;
           }
-          ptrCountInCurrentFlight++;
         }
         globalPtrIdx++;
       }
       return targetButtonIdx;
-    }, { flightItemIndex, cabinIndex });
+    }, { flightItemIndex, cabinType });
 
     if (domOffset < 0) {
-      throw new Error(`无法定位到航班 ${expectedFlightNo} 的第 ${cabinIndex} 个舱位按钮`);
+      throw new Error(`无法定位到航班 ${expectedFlightNo} 的 ${cabinType} 舱位按钮`);
     }
 
     // Verify we're on the right search results page

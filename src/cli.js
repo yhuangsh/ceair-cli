@@ -587,6 +587,7 @@ program
         searchResult: result,
         flightItemIndex: selectedFlight.flightItemIndex,
         cabinIndex: realCabinIdx,
+        cabinType: selectedBrand.cabinType || 'Y',
         passenger: pax,
         contact,
       });

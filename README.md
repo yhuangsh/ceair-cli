@@ -138,7 +138,7 @@ Orders are created in **unpaid** state. Complete payment on the [CEAir website](
 
 ### Known Limitations
 
-- **Non-MU booking**: Search and display work for all airlines (CA, CZ, FM, HO, KN, etc.), but **booking only works for MU-operated flights**. Codeshare/other-carrier flights fail at the addServices submit step (compiled Vue code accesses flight product data differently). This is a known issue (Bug #3).
+- **Non-MU booking**: ✅ Fixed in v1.3.1. All airlines (CA, CZ, FM, HO, KN) can now be booked. The DOM cabin button uses cabin class type (Y/W/J/F) instead of fare subclass index.
 - **Cancel order**: Some orders (e.g., already ticketed) return A500 from the API — cancel via the website instead.
 
 ### Bug History
@@ -147,7 +147,7 @@ Orders are created in **unpaid** state. Complete payment on the [CEAir website](
 |-----|-------------|-------|
 | #1 | Cabin offset calculated wrong for variable cabin counts | v1.1.0 |
 | #2 | Date picker not filling for future months | v1.1.0 |
-| #3 | Non-MU flights crash at addServices.submit() | Open |
+| #3 | Non-MU flights: DOM cabin button mismatch | v1.3.1 |
 | #4 | cancelOrder fails on ERROR/FETCH_ERROR | v1.1.0 |
 | #5 | localStorage/sessionStorage not cleared on logout | v1.1.0 |
 | #6 | DOM cabin offset uses API counts — booked wrong cabin (¥4,180 instead of ¥550) | v1.2.0 |
