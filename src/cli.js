@@ -941,7 +941,7 @@ program
     '  ceair-cli config set passenger.phone 13800138000\n' +
     '  ceair-cli config set passenger.idNo 110101199001011234'
   )
-  .version('2.0.0')
+  .version(require('./package.json').version)
   .parse(process.argv);
 
 if (!process.argv.slice(2).length) {

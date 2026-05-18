@@ -588,42 +588,82 @@ class CeairApi {
 
     // ─── Fill departure date ───────────────────────────────
     // The form defaults to today; we must set the requested date.
-    try {
-      await this.page.evaluate((dateStr) => {
-        // Strategy 1: Find date input by placeholder/class and set value
-        const candidates = document.querySelectorAll(
-          'input[placeholder*="日期"], input[placeholder*="出发"], ' +
-          '.ceair-date-editor input, .ceair-input__inner_homesearch[type="text"]'
-        );
-        for (const input of candidates) {
-          const rect = input.getBoundingClientRect();
-          if (rect.width < 10) continue; // skip hidden
-          // Remove readonly if present
-          input.removeAttribute('readonly');
-          const nativeSetter = Object.getOwnPropertyDescriptor(
-            HTMLInputElement.prototype, 'value'
-          ).set;
-          nativeSetter.call(input, dateStr);
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          return true;
+    // Key: set the date through the Vuex store, not just the DOM input.
+    const dateSet = await this.page.evaluate((dateStr) => {
+      // Strategy 1: Set date directly in Vuex store
+      const store = window.$nuxt?.$store;
+      if (store) {
+        const search = store.state?.search;
+        if (search) {
+          // Try common state paths
+          if (search.departDate !== undefined) {
+            store.commit('search/setDepartDate', dateStr);
+            return 'vuex-commit';
+          }
+          if (search.form?.departDate !== undefined) {
+            store.commit('search/setFormDepartDate', dateStr);
+            return 'vuex-form';
+          }
+          // Direct mutation as last resort
+          search.departDate = dateStr;
+          if (search.form) search.form.departDate = dateStr;
+          return 'vuex-direct';
         }
+      }
 
-        // Strategy 2: Find Vue date picker component and set its value
-        const allEls = document.querySelectorAll('[class*="date"], [class*="picker"]');
-        for (const el of allEls) {
-          const vue = el.__vue__;
-          if (vue && typeof vue.$emit === 'function') {
+      // Strategy 2: Find the Vue date picker component
+      const allInputs = document.querySelectorAll('input');
+      for (const input of allInputs) {
+        const vue = input.__vue__ || input.closest('[class*="date"]')?.__vue__;
+        if (vue) {
+          // DatePicker components typically watch 'value' prop
+          if (vue.$options?.propsData?.value !== undefined || vue.value !== undefined) {
             vue.$emit('input', dateStr);
             vue.$emit('change', dateStr);
-            return true;
+            return 'vue-datepicker';
           }
         }
-        return false;
-      }, depDate);
-      await this.page.waitForTimeout(300);
-    } catch {
-      // Date filling failed — search may use today's date
+      }
+
+      // Strategy 3: DOM input with native setter + Vue reactivity
+      const candidates = document.querySelectorAll(
+        'input[placeholder*="日期"], input[placeholder*="出发"], ' +
+        '.ceair-date-editor input, .ceair-input__inner_homesearch[type="text"]'
+      );
+      for (const input of candidates) {
+        const rect = input.getBoundingClientRect();
+        if (rect.width < 10) continue;
+        input.removeAttribute('readonly');
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeSetter.call(input, dateStr);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return 'dom-input';
+      }
+      return false;
+    }, depDate);
+
+    // Verify the date was actually set by reading it back
+    await this.page.waitForTimeout(500);
+    const dateVerified = await this.page.evaluate(() => {
+      const store = window.$nuxt?.$store;
+      const search = store?.state?.search;
+      return {
+        storeDate: search?.departDate || search?.form?.departDate,
+        inputDate: (() => {
+          const inputs = document.querySelectorAll('input[placeholder*="日期"], .ceair-date-editor input');
+          for (const i of inputs) {
+            if (i.value && i.getBoundingClientRect().width > 10) return i.value;
+          }
+          return null;
+        })(),
+      };
+    });
+
+    if (dateVerified.storeDate !== depDate && dateVerified.inputDate !== depDate) {
+      console.warn(`Date may not be set correctly: requested=${depDate}, store=${dateVerified.storeDate}, input=${dateVerified.inputDate}, method=${dateSet}`);
     }
 
     // Listen for S200 on the network
@@ -777,12 +817,42 @@ class CeairApi {
       throw new Error(`航班序号 ${flightItemIndex} 超出范围`);
     }
 
+    // Verify the flight at flightItemIndex matches what we expect
+    const expectedFlight = flightItems[flightItemIndex];
+    const expectedSeg = expectedFlight.flightInfos?.[0]?.flightSegments?.[0];
+    const expectedFlightNo = expectedSeg
+      ? (expectedSeg.carrierCode || expectedSeg.airlineCode || '') + expectedSeg.flightNo
+      : null;
+
     // Calculate correct DOM offset by summing cabin counts of all preceding flights
     let targetCabinOffset = 0;
     for (let i = 0; i < flightItemIndex; i++) {
       targetCabinOffset += flightItems[i].cabinInfoDescs?.length || 1;
     }
     targetCabinOffset += cabinIndex;
+
+    // ─── Verify flight number on the page matches the expected flight ───
+    // The shopping page shows flight cards. We verify the expected flight exists
+    // by checking text content of the page (flight numbers are prominently displayed).
+    const domVerified = await page.evaluate((expectedFlightNo) => {
+      // Check all elements that might contain flight numbers
+      const allText = document.body.innerText;
+      // Flight numbers like MU5127, CA1508 appear as standalone tokens
+      const flightNoPattern = /\b[A-Z]{1,2}\d{3,5}\b/g;
+      const pageFlightNos = allText.match(flightNoPattern) || [];
+      return {
+        pageFlightNos: [...new Set(pageFlightNos)],
+        hasExpected: pageFlightNos.includes(expectedFlightNo),
+      };
+    }, expectedFlightNo);
+
+    if (!domVerified.hasExpected) {
+      // Page doesn't show the expected flight — search results may be stale
+      throw new Error(
+        `页面未找到航班 ${expectedFlightNo}（页面上有: ${domVerified.pageFlightNos.join(', ')}）。` +
+        `搜索结果可能已过期，请重新搜索。`
+      );
+    }
 
     // Scroll the target flight into view (approximate)
     await page.evaluate((idx) => {
