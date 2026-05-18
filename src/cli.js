@@ -498,7 +498,7 @@ program
         const answer = await inquirer.prompt([{
           type: 'list', name: 'brandIndex', message: '选择舱位/品牌:',
           choices: selectedFlight.priceOptions.map((p, i) => ({
-            name: `${p.brand}(${p.cabin}) ¥${p.price}`, value: i,
+            name: `${p.brand}(${p.cabin}) ¥${p.price} (含税¥${p.totalPrice})`, value: i,
           })),
         }]);
         cabinIdx = answer.brandIndex;
@@ -552,7 +552,7 @@ program
       console.log(chalk.white(`航班: ${selectedFlight.flightNo} ${getCityName(depCity)}→${getCityName(arrCity)}`));
       console.log(chalk.white(`日期: ${formatDate(fields.date)}`));
       console.log(chalk.white(`舱位: ${selectedBrand.brand}(${selectedBrand.cabin})`));
-      console.log(chalk.white(`价格: ¥${selectedBrand.price}`));
+      console.log(chalk.white(`价格: ¥${selectedBrand.price} (含税¥${selectedBrand.totalPrice})`));
       console.log(chalk.white(`乘机人: ${pax.name} (${pax.idNo})`));
       console.log(chalk.white(`联系人: ${contact.name} ${contact.phone}`));
 
