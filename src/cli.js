@@ -611,10 +611,12 @@ program
     '    Flight number, times, terminals, aircraft\n' +
     '    Seat / check-in status\n' +
     '    Cabin class, meal, baggage\n\n' +
-    '  Use --all for historical/cancelled orders.')
+    '  Use --all for historical/cancelled orders.\n' +
+    '  Use --paid to show only ticketed (paid) orders.')
   .option('-a, --all', 'Show all orders including past and cancelled')
+  .option('--paid', 'Only show paid/ticketed orders (excludes unpaid)')
   .option('-p, --page <num>', 'Page number', '1')
-  .addHelpText('after', '\nExamples:\n  $ ceair-cli orders\n  $ ceair-cli orders --all\n  $ ceair-cli orders --page 2')
+  .addHelpText('after', '\nExamples:\n  $ ceair-cli orders\n  $ ceair-cli orders --paid\n  $ ceair-cli orders --all\n  $ ceair-cli orders --page 2')
   .action(async (opts) => {
     const api = requireApi();
     try {
@@ -641,8 +643,12 @@ program
         const seg = o.segList?.[0];
         const depDate = seg?.deptDtStr?.substring(0, 10);
         const isActive = o.orderStatus === '10050' || o.orderStatus === '10054';
+        const isPaid = o.orderStatus === '10054';
         const isFuture = depDate && depDate >= today;
-        if ((isActive && isFuture) || (isActive && o.orderStatus === '10050')) {
+        if (opts.paid && !isPaid) {
+          // --paid mode: skip non-ticketed orders entirely
+          other.push(o);
+        } else if ((isActive && isFuture) || (isActive && o.orderStatus === '10050')) {
           futureActive.push(o);
         } else {
           other.push(o);
@@ -650,8 +656,11 @@ program
       }
 
       if (futureActive.length > 0) {
+        const header = opts.paid
+          ? '  ║       已出票 / 即将出行                ║'
+          : '  ║       即将出行 / 待处理订单          ║';
         console.log(chalk.bold.green('\n  ╔══════════════════════════════════════╗'));
-        console.log(chalk.bold.green('  ║       即将出行 / 待处理订单          ║'));
+        console.log(chalk.bold.green(header));
         console.log(chalk.bold.green('  ╚══════════════════════════════════════╝'));
 
         for (const order of futureActive) {
