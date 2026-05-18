@@ -132,6 +132,11 @@ Uses [Playwright](https://playwright.dev/) Chromium to bypass China Eastern's WA
 
 Orders are created in **unpaid** state. Complete payment on the [CEAir website](https://www.ceair.com) or app. Customer service: **95530**.
 
+### Known Limitations
+
+- **Non-MU booking**: Search and display work for all airlines (CA, CZ, FM, HO, KN, etc.), but **booking only works for MU-operated flights**. Codeshare/other-carrier flights fail at the addServices submit step (compiled Vue code accesses flight product data differently). This is a known issue (Bug #3).
+- **Cancel order**: Some orders (e.g., already ticketed) return A500 from the API — cancel via the website instead.
+
 ## Architecture
 
 ```
