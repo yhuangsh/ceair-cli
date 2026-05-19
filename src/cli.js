@@ -612,16 +612,16 @@ program
     '    Seat / check-in status\n' +
     '    Cabin class, meal, baggage\n\n' +
     '  Use --all for historical/cancelled orders.\n' +
-    '  Use --paid to show only ticketed (paid) orders.')
+    '  Use --paid to show only ticketed (paid) orders.\n' +
+    '  Note: currently shows first page only.')
   .option('-a, --all', 'Show all orders including past and cancelled')
   .option('--paid', 'Only show paid/ticketed orders (excludes unpaid)')
-  .option('-p, --page <num>', 'Page number', '1')
-  .addHelpText('after', '\nExamples:\n  $ ceair-cli orders\n  $ ceair-cli orders --paid\n  $ ceair-cli orders --all\n  $ ceair-cli orders --page 2')
+  .addHelpText('after', '\nExamples:\n  $ ceair-cli orders\n  $ ceair-cli orders --paid\n  $ ceair-cli orders --all')
   .action(async (opts) => {
     const api = requireApi();
     try {
       const spinner = ora('查询订单...').start();
-      const result = await api.queryOrderList({ page: parseInt(opts.page) });
+      const result = await api.queryOrderList({ page: 1, pageSize: 10 });
       spinner.stop();
 
       if (!result?.data) {
@@ -730,7 +730,7 @@ program
         console.log(chalk.gray('  (使用 --all 查看历史/已取消订单)'));
       }
 
-      console.log(chalk.gray(`\n  共 ${result.data.total || orders.length} 条 (第 ${opts.page} 页)`));
+      console.log(chalk.gray(`\n  共 ${result.data.total || orders.length} 条 (显示前10条)`));
     } catch (err) {
       console.error(chalk.red('查询出错:'), err.message);
     } finally {
